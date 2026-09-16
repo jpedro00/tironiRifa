@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { loadRootEnv } from '../loadEnv.js';
 
 const { Client } = pg;
 
@@ -32,6 +33,7 @@ function quoteLiteral(value: string): string {
 }
 
 async function main(): Promise<void> {
+  await loadRootEnv();
   const adminUrl = requireEnv('ADMIN_DATABASE_URL');
   const databaseName = process.env['DATABASE_NAME']?.trim() || 'campaigns';
   const appPassword = requireEnv('APP_DB_PASSWORD');

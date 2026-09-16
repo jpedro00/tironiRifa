@@ -1,25 +1,30 @@
 import pg from 'pg';
+import { loadRootEnv } from '../loadEnv.js';
 
 const { Client } = pg;
 
 /**
  * Recria o banco de TESTE do zero e aplica as migrations.
  *
- * Por que existe: o registro `schema_migrations` guarda o checksum de cada
- * migration aplicada, e o runner recusa rodar quando um arquivo ja aplicado
- * muda (prevencao do erro E6 — coluna e CHECK criadas por patch manual). Essa
+ * Por que existe: `schema_migrations` guarda o checksum de cada migration
+ * aplicada, e o runner recusa rodar quando um arquivo ja aplicado muda
+ * (prevencao do erro E6 — coluna e CHECK criadas por patch manual). Essa
  * guarda e correta, mas trava o banco quando a migration mudou legitimamente
  * durante o desenvolvimento, antes de existir producao.
  *
  * A saida certa NAO e afrouxar a guarda nem editar `schema_migrations` na mao:
  * e reconstruir o banco a partir do repositorio, que e a fonte da verdade.
  *
+ * QUAL BANCO E RECONSTRUIDO: o nome sai de `TEST_MIGRATION_DATABASE_URL`, a
+ * mesma URL que a suite usa para migrar. Ler o nome de uma variavel separada
+ * permitiria apagar um banco e migrar outro — exatamente o tipo de descuido
+ * que este script existe para evitar.
+ *
  * SEGURANCA: recusa qualquer banco cujo nome nao termine em `_test`. Este
  * script APAGA o banco inteiro.
  *
  * Uso:
- *   ADMIN_DATABASE_URL=... TEST_DATABASE_NAME=campaigns_test \
- *   MIGRATION_DATABASE_URL=... npm run db:reset-test -w @campaigns/db
+ *   npm run db:reset-test
  */
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -29,17 +34,42 @@ function requireEnv(name: string): string {
   return value;
 }
 
-async function main(): Promise<void> {
-  const adminUrl = requireEnv('ADMIN_DATABASE_URL');
-  const databaseName = process.env['TEST_DATABASE_NAME']?.trim() || 'campaigns_test';
-
-  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(databaseName)) {
-    throw new Error(`TEST_DATABASE_NAME invalido: ${databaseName}`);
+function databaseNameFrom(connectionString: string, varName: string): string {
+  let url: URL;
+  try {
+    url = new URL(connectionString);
+  } catch {
+    throw new Error(`${varName} nao e uma URL de conexao valida.`);
   }
+  const name = decodeURIComponent(url.pathname.replace(/^\//, ''));
+  if (name === '') {
+    throw new Error(`${varName} nao indica um banco de dados no caminho da URL.`);
+  }
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+    throw new Error(`Nome de banco invalido em ${varName}: ${name}`);
+  }
+  return name;
+}
+
+async function main(): Promise<void> {
+  await loadRootEnv();
+
+  const adminUrl = requireEnv('ADMIN_DATABASE_URL');
+  const testMigrationUrl = requireEnv('TEST_MIGRATION_DATABASE_URL');
+  const databaseName = databaseNameFrom(testMigrationUrl, 'TEST_MIGRATION_DATABASE_URL');
+
   if (!databaseName.endsWith('_test')) {
     throw new Error(
       `Recusado: "${databaseName}" nao termina em "_test". ` +
         'Este script apaga o banco inteiro e so opera sobre bancos de teste.',
+    );
+  }
+
+  // O admin nao pode estar conectado ao banco que sera derrubado.
+  if (databaseNameFrom(adminUrl, 'ADMIN_DATABASE_URL') === databaseName) {
+    throw new Error(
+      `ADMIN_DATABASE_URL aponta para "${databaseName}", que sera derrubado. ` +
+        'Use uma conexao administrativa a outro banco (por exemplo, "postgres").',
     );
   }
 
@@ -66,11 +96,26 @@ async function main(): Promise<void> {
     await admin.end();
   }
 
-  const migrationUrl = requireEnv('MIGRATION_DATABASE_URL');
   const { migrate } = await import('../migrator.js');
-  const result = await migrate(migrationUrl);
-  console.log(`migrations aplicadas (${result.applied.length}):`);
+  const result = await migrate(testMigrationUrl);
+
+  console.log(`\nmigrations aplicadas (${result.applied.length}):`);
   for (const filename of result.applied) console.log(`  + ${filename}`);
+
+  // Mostra o registro final, para conferencia do checksum de cada versao.
+  const check = new Client({ connectionString: testMigrationUrl });
+  await check.connect();
+  try {
+    const { rows } = await check.query<{ version: string; name: string; checksum: string }>(
+      'SELECT version, name, checksum FROM schema_migrations ORDER BY version',
+    );
+    console.log('\nschema_migrations:');
+    for (const row of rows) {
+      console.log(`  ${row.version}  ${row.name.padEnd(28)}  ${row.checksum.slice(0, 16)}…`);
+    }
+  } finally {
+    await check.end();
+  }
 
   console.log('\nbanco de teste pronto. Rode: npm test');
 }

@@ -6,6 +6,7 @@ import {
   TENANT_PERMISSIONS,
   PLATFORM_PERMISSIONS,
   routeKey,
+  type RouteContract,
 } from '@campaigns/shared';
 import { createApp } from '../src/app.js';
 import { listRegisteredRoutes } from '../src/http/registerRoutes.js';
@@ -86,7 +87,7 @@ describe('coerencia do contrato', () => {
 
   it('permissao citada no contrato existe no catalogo', () => {
     for (const name of ROUTE_NAMES) {
-      const contract = ROUTE_CONTRACTS[name];
+      const contract: RouteContract = ROUTE_CONTRACTS[name];
       if (contract.tenantPermission) {
         expect(TENANT_PERMISSIONS).toContain(contract.tenantPermission);
       }
@@ -98,7 +99,7 @@ describe('coerencia do contrato', () => {
 
   it('rota com permissao de comunidade exige comunidade resolvida', () => {
     for (const name of ROUTE_NAMES) {
-      const contract = ROUTE_CONTRACTS[name];
+      const contract: RouteContract = ROUTE_CONTRACTS[name];
       if (contract.tenantPermission) {
         expect(contract.tenantScope, `${name} exige tenantScope resolved`).toBe('resolved');
         expect(contract.auth, `${name} exige sessao`).toBe(true);
@@ -108,7 +109,7 @@ describe('coerencia do contrato', () => {
 
   it('rota com permissao de plataforma exige sessao e MFA (RN12)', () => {
     for (const name of ROUTE_NAMES) {
-      const contract = ROUTE_CONTRACTS[name];
+      const contract: RouteContract = ROUTE_CONTRACTS[name];
       if (contract.platformPermission) {
         expect(contract.auth, `${name} exige sessao`).toBe(true);
         expect(contract.mfa, `${name} exige MFA`).toBe(true);
@@ -118,7 +119,7 @@ describe('coerencia do contrato', () => {
 
   it('rota que exige MFA tambem exige sessao', () => {
     for (const name of ROUTE_NAMES) {
-      const contract = ROUTE_CONTRACTS[name];
+      const contract: RouteContract = ROUTE_CONTRACTS[name];
       if (contract.mfa) expect(contract.auth).toBe(true);
     }
   });

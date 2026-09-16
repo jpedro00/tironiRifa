@@ -1,4 +1,5 @@
 import { migrate } from '../migrator.js';
+import { loadRootEnv } from '../loadEnv.js';
 
 /**
  * Aplica as migrations pendentes.
@@ -8,6 +9,7 @@ import { migrate } from '../migrator.js';
  * justamente por isso que a RLS vale para ele.
  */
 async function main(): Promise<void> {
+  await loadRootEnv();
   const url =
     process.env['MIGRATION_DATABASE_URL']?.trim() || process.env['DATABASE_URL']?.trim();
 

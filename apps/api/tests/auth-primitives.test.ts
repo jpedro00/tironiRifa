@@ -137,7 +137,8 @@ describe('cifragem do segredo TOTP', () => {
 
   it('registro adulterado falha na decifragem (AES-GCM e autenticado)', () => {
     const encrypted = box.encrypt('JBSWY3DPEHPK3PXP');
-    encrypted[encrypted.length - 1] ^= 0xff;
+    const last = encrypted.length - 1;
+    encrypted.writeUInt8(encrypted.readUInt8(last) ^ 0xff, last);
     expect(() => box.decrypt(encrypted)).toThrow();
   });
 
