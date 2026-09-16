@@ -69,10 +69,9 @@ export interface MigrateResult {
  * Aplica as migrations pendentes, cada uma na PROPRIA transacao.
  *
  * Uma migration ja aplicada tem o checksum conferido: editar um arquivo
- * versionado depois de aplicado e erro, nao atualizacao silenciosa. Foi
- * exatamente assim que a NewStore ganhou uma CHECK constraint de status
- * desatualizada (erro E3) — coluna e restricao criadas por patch manual, fora
- * do arquivo versionado.
+ * versionado depois de aplicado e erro, nao atualizacao silenciosa (erros E3 e
+ * E6). Coluna ou restricao criada por patch manual, fora do arquivo
+ * versionado, produz bancos que divergem em silencio entre ambientes.
  */
 export async function migrate(connectionString: string, dir?: string): Promise<MigrateResult> {
   const migrations = await loadMigrations(dir);

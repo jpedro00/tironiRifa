@@ -9,9 +9,11 @@
  * Identificadores Mermaid como `VENDAS_ENCERRADAS` no diagrama do DOC-01 sao
  * apenas apelidos de renderizacao; o valor persistido tem espaco.
  *
- * E3 (erro da migracao XNAMAI): este array e a UNICA fonte dos rotulos. A
- * migration cria o tipo `draw_status` a partir desta mesma lista e um teste
- * compara pg_enum com este array.
+ * E3 - vocabulario unico de status: este array e a UNICA fonte dos rotulos.
+ * A migration cria o tipo `draw_status` a partir desta mesma lista e um teste
+ * compara pg_enum com este array. Dois vocabularios evoluindo em separado -
+ * um no codigo, outro no banco - terminam numa CHECK desatualizada que recusa
+ * insercoes validas.
  */
 export const DRAW_STATUSES = [
   'RASCUNHO',

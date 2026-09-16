@@ -10,10 +10,10 @@ import { buildHealthHandler } from '../modules/health/healthRoutes.js';
 /**
  * Registro das rotas a partir do contrato compartilhado.
  *
- * E4 da migracao XNAMAI: o frontend chamava uma rota que nunca existiu no
- * backend. Aqui as rotas NASCEM do mesmo registro que os frontends usam para
- * montar as chamadas, e a funcao falha na subida se faltar handler para algum
- * contrato — o processo nem sobe com uma rota declarada e nao implementada.
+ * E4 - contrato frontend/backend: as rotas NASCEM do mesmo registro que os
+ * frontends usam para montar as chamadas, e a funcao falha na subida se faltar
+ * handler para algum contrato — o processo nem sobe com uma rota declarada e
+ * nao implementada.
  *
  * Caminhos isentos da trava global de MFA: sao exatamente as rotas que
  * permitem cadastrar e verificar o segundo fator, mais diagnostico e vitrine

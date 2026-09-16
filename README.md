@@ -36,7 +36,6 @@ packages/
   db/           Migrations versionadas, pool e contexto transacional de tenant.
 docs/
   decisions/    Decisões e suposições da fase.
-  parity/       Divergências entre o DOC-01 e o código da NewStore.
 ```
 
 Os módulos **M01–M12** vivem em `apps/api/src/modules/`. Esta fase implementa
@@ -273,22 +272,21 @@ rota inexistente quebra o typecheck, não a produção (erro E4).
 
 - [`docs/decisions/fase-1-decisoes.md`](docs/decisions/fase-1-decisoes.md) —
   decisões, suposições e pendências abertas.
-- [`docs/parity/newstore-divergences.md`](docs/parity/newstore-divergences.md) —
-  divergências entre o DOC-01 e o código da NewStore, incluindo o prazo de
-  reserva.
 
 ---
 
 ## Próxima fase
 
-**Fase 2 — núcleo NewStore:** grade dinâmica, reservas de 30 minutos, pedidos e
-PIX via Mercado Pago, com testes de paridade primeiro.
+**Fase 2 — núcleo de sorteios:** grade dinâmica, reservas de 30 minutos,
+pedidos e pagamento PIX avulso.
 
-Antes de começar, três coisas precisam de decisão do produto:
+Antes de começar, quatro decisões do produto:
 
-1. **Prazo de reserva** — o DOC-01 fixa 30; o código da NewStore usa 5 ou 30
-   conforme a rota, via variável de ambiente. Ver `docs/parity/`.
-2. **Trava de reserva** — o DOC-01 §9 desenha Redis; o painel do Astra escolhe
-   só PostgreSQL. A divergência está registrada, não resolvida.
-3. **Matriz do Super Admin (S8)** — a distribuição atual por sub-perfil é
+1. **Trava de reserva** — só PostgreSQL (transação + índice único parcial) ou
+   PostgreSQL + Redis. O DOC-01 §9 desenha Redis; a escolha operacional padrão
+   é só PostgreSQL. Registrado, não resolvido.
+2. **Matriz do Super Admin (S8)** — a distribuição atual por sub-perfil é
    suposição conservadora e precisa de validação.
+3. **Cache no `originGuard`** — hoje cada requisição com `Origin` desconhecida
+   consulta o banco.
+4. **Provedores de pagamento** — PIX avulso e recorrência: a definir.

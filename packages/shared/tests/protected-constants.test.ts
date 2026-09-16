@@ -29,8 +29,7 @@ describe('constantes protegidas', () => {
   });
 
   it('RN05 · o prazo de reserva nao e 10 nem 5 minutos', () => {
-    // C01: o D01 e o PROMPT_GERAL supunham 10 min; o codigo da NewStore usa 5
-    // em algumas rotas. O DOC-01 fixa 30. Ver docs/parity/newstore-divergences.md.
+    // C01: o D01 e o prompt geral supunham 10 min. O DOC-01 fixa 30.
     expect(RESERVATION_TTL_MINUTES).not.toBe(10);
     expect(RESERVATION_TTL_MINUTES).not.toBe(5);
   });

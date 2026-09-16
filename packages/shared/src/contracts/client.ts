@@ -19,10 +19,9 @@ import { API_ERROR_MESSAGES, type ApiErrorBody, type ApiErrorCode } from './erro
 /**
  * Cliente HTTP tipado, compartilhado pelos tres frontends.
  *
- * E4 da migracao XNAMAI: o frontend chamava uma rota que nao existia no
- * backend. Aqui a chamada e feita por NOME de contrato, nao por string de
- * caminho. Um nome inexistente e erro de compilacao — o build quebra antes de
- * qualquer deploy, e nao em producao com um 404.
+ * E4 - contrato frontend/backend: a chamada e feita por NOME de contrato, nao
+ * por string de caminho. Um nome inexistente e erro de compilacao — o build
+ * quebra antes de qualquer deploy, e nao em producao com um 404.
  */
 
 /** Resposta de cada rota. */

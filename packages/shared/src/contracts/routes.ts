@@ -3,8 +3,10 @@ import { MEMBERSHIP_ROLES, PLATFORM_ROLES } from '../permissions/roles.js';
 import { TENANT_PERMISSIONS, PLATFORM_PERMISSIONS } from '../permissions/permissions.js';
 
 /**
- * Registro unico de contratos de rota. E4 da migracao XNAMAI: o frontend
- * chamava POST /checkout, que nunca existiu no backend.
+ * Registro unico de contratos de rota.
+ *
+ * E4 - contrato frontend/backend: uma rota chamada pelo frontend e inexistente
+ * no backend so aparece em producao, como 404.
  *
  * Esta lista e a UNICA fonte:
  *  - a API registra as rotas a partir daqui (apps/api/src/http/registerRoutes.ts);

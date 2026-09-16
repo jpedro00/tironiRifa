@@ -15,8 +15,7 @@ import { SecretBox } from '../src/lib/secretBox.js';
 import { createPool } from '@campaigns/db';
 
 /**
- * E4 · o frontend do XNAMAI chamava POST /checkout, que nunca existiu no
- * backend. Este teste falha nos dois sentidos:
+ * E4 · contrato frontend/backend. Este teste falha nos dois sentidos:
  *   - contrato declarado sem rota registrada;
  *   - rota registrada fora do contrato.
  *

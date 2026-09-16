@@ -1,8 +1,8 @@
 /**
  * Grade de numeros - constantes protegidas.
- * DOC-01 secao 4 passo 3, secao 18 e RN13. Paridade NewStore.
+ * Regra de produto (DOC-01 secao 4 passo 3, secao 18 e RN13).
  *
- * Nomes de coluna herdados preservados literalmente:
+ * Nomes de coluna fixos, preservados literalmente:
  * number_count, total_numbers, label_digits.
  */
 
@@ -37,7 +37,7 @@ export function labelDigitsForGridSize(gridSize: number): 2 | 3 {
 }
 
 /**
- * Rotulo de um numero com zeros a esquerda. Paridade NewStore.
+ * Rotulo de um numero com zeros a esquerda. Regra de produto (DOC-01).
  * 100 -> 00..99 | 500 -> 000..499 | 1000 -> 000..999
  */
 export function formatNumberLabel(value: number, labelDigits: 2 | 3): string {

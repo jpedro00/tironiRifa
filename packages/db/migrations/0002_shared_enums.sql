@@ -2,11 +2,11 @@
 -- 0002 · Enums compartilhados de estado
 --
 -- Modulo: M02 (campanhas) · M03 (reservas) — tipos criados na fundacao
--- Regras: RN13, RN18 · Prevencao do erro E3 da migracao NewStore -> XNAMAI
+-- Regras: RN13, RN18 · Prevencao do erro E3 (vocabulario unico de status)
 --
--- E3: uma CHECK constraint de status desatualizada bloqueou inserts de reserva
--- em producao. A causa foi ter dois vocabularios - um no codigo, outro no
--- banco - evoluindo em separado.
+-- E3: uma CHECK constraint de status desatualizada recusa insercoes que o
+-- codigo considera validas. A causa e ter dois vocabularios - um no codigo,
+-- outro no banco - evoluindo em separado.
 --
 -- Correcao: os rotulos existem UMA vez em packages/shared/src/states/ e sao
 -- transcritos aqui. O teste packages/db/tests/enum-parity.test.ts compara
@@ -41,7 +41,7 @@ COMMENT ON TYPE draw_status IS
   'catalogo porque o ciclo a inclui, mas a ativacao agendada nao foi implementada '
   'na fundacao.';
 
--- DOC-01 secao 8 · seis estados. Paridade NewStore.
+-- DOC-01 secao 8 · seis estados. Regra de produto.
 CREATE TYPE draw_number_status AS ENUM (
   'LIVRE',
   'RESERVADO',

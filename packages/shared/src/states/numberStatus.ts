@@ -1,5 +1,5 @@
 /**
- * Estados de cada numero da grade. DOC-01 secao 8. Paridade NewStore.
+ * Estados de cada numero da grade. Regra de produto (DOC-01 secao 8).
  *
  * Valores persistidos literalmente em portugues. "CATIVO PENDENTE" tem espaco:
  * `CATIVO_PENDENTE` no diagrama e apenas o identificador Mermaid.
@@ -25,7 +25,7 @@ export function isDrawNumberStatus(value: unknown): value is DrawNumberStatus {
  * ESTORNADO e terminal aqui. O DOC-01 registra, na mesma secao, uma nota de
  * que um numero estornado com sorteio ATIVA voltaria a LIVRE (S1). Essa volta
  * NAO e implementada como regra confirmada: e uma divergencia interna aberta
- * (C07 / S1) a resolver na fase de estornos, com o codigo da NewStore.
+ * (C07 / S1) a resolver na fase de estornos.
  */
 export const DRAW_NUMBER_STATUS_TRANSITIONS: Readonly<
   Record<DrawNumberStatus, readonly DrawNumberStatus[]>

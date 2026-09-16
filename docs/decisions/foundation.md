@@ -2,11 +2,9 @@
 
 Data: 2026-09-16. Escopo autorizado: Fase 1, sem commit, push ou deploy.
 
-Fontes: DOC-01, D01 e prompts Astra/Geral encontrados em `C:/Users/jpfma/Downloads`.
+Fontes funcionais: DOC-01, D01 e prompts Astra/Geral.
 O relatório Fase 0 foi fornecido integralmente na conversa; seu arquivo não foi encontrado.
-O draw.io original foi encontrado e seu conteúdo textual inspecionado. NewStore frontend/backend
-também existem em Downloads; identidade foi inspecionada, sem portar regras financeiras.
-O link complementar Claude não abriu. Context7 não está disponível.
+O diagrama de arquitetura original foi inspecionado.
 
 Suposição: preservar a fundação parcial existente e completá-la no diretório solicitado.
 Suposição: identidade global em users, credenciais, fatores e sessões; memberships por comunidade.

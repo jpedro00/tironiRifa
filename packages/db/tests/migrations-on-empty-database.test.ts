@@ -14,8 +14,8 @@ const { Client } = pg;
  *
  * O teste cria um banco novo, aplica tudo do zero e confere o schema
  * resultante. Rodar migrations sobre um banco que ja tem as tabelas nao prova
- * que elas nascem corretas — foi assim que a NewStore acumulou coluna e CHECK
- * criadas por patch manual (E6).
+ * que elas nascem corretas: coluna e CHECK criadas por patch manual passariam
+ * despercebidas (E6).
  */
 
 function databaseUrlWith(base: string, databaseName: string): string {

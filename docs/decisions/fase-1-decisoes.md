@@ -114,7 +114,7 @@ simples por id deixaria uma linha de A apontar para um registro de B.
 `MARKETING`, `SUPPORT`, `OPERATOR`), com rótulos em português na interface.
 
 Justificativa: a restrição de "nomes fixos" do DOC-01 e do PROMPT_ASTRA cobre
-os **estados de sorteio e de número** e as **colunas herdadas da NewStore** —
+os **estados de sorteio e de número** e as **colunas de grade e preço** —
 o DOC-01 apresenta os papéis apenas como rótulos de tabela. Os estados, esses
 sim, foram preservados literalmente em português, com acento e espaço.
 
@@ -197,7 +197,6 @@ regra:
 
 | Código | Pendência |
 |---|---|
-| C01 / D01 | Prazo de reserva: 30 no DOC-01, 5 ou 30 no código da NewStore conforme a rota. Ver `docs/parity/newstore-divergences.md`. |
 | C06 | Pausa de cativos: §7 e §10 divergem. |
 | C07 / S1 | `ESTORNADO` terminal × retorno a `LIVRE`. Implementado como terminal; a volta não virou regra. |
 | S3 / S4 | Pagamento após expiração, fechamento ou snapshot. |

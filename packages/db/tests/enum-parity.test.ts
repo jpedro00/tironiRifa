@@ -14,8 +14,8 @@ import {
 } from './helpers/testDb.js';
 
 /**
- * E3 · o erro da migracao NewStore -> XNAMAI: uma CHECK constraint de status
- * desatualizada no banco bloqueou inserts que o codigo considerava validos.
+ * E3 · vocabulario unico de status: uma CHECK constraint desatualizada no
+ * banco recusa inserts que o codigo considera validos.
  *
  * Este teste falha se o vocabulario do banco e o do codigo divergirem em
  * QUALQUER direcao: valor a mais, valor a menos ou ordem diferente.

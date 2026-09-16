@@ -1,5 +1,5 @@
 /**
- * Avisos de numeros restantes. DOC-01 secao 11 e RN18. Paridade NewStore.
+ * Avisos de numeros restantes. Regra de produto (DOC-01 secao 11, RN18).
  *
  * "faltando X" = total_numbers - numeros PAGOS.
  * RESERVADO e CATIVO PENDENTE nunca contam como vendidos.

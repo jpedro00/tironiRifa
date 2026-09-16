@@ -4,7 +4,7 @@
  * Suposicao: os codigos persistidos ficam em ingles maiusculo (OWNER, FINANCE,
  * ...), seguindo a regra "codigo e banco em ingles" do PROMPT_ASTRA. A
  * restricao de "nomes fixos" do DOC-01 cobre os estados de sorteio/numero e as
- * colunas herdadas da NewStore, nao os codigos de papel - o DOC-01 apresenta
+ * colunas de grade e preco, nao os codigos de papel - o DOC-01 apresenta
  * os papeis apenas como rotulos de interface (Dono, Financeiro, Marketing,
  * Suporte, Operador). Os rotulos em portugues ficam em MEMBERSHIP_ROLE_LABELS.
  *

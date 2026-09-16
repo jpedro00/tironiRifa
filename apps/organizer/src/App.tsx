@@ -118,7 +118,7 @@ function Shell() {
           />
           <Route
             path="/sorteios"
-            element={<NotBuiltYet area="Sorteios" phase="Fase 2 — núcleo NewStore" />}
+            element={<NotBuiltYet area="Sorteios" phase="Fase 2 — núcleo de sorteios" />}
           />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
