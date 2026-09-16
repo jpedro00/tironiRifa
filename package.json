@@ -1,0 +1,45 @@
+{
+  "name": "campaigns-platform",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Plataforma de Campanhas & Comunidades - monorepo (Fase 1: Fundacao)",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "workspaces": [
+    "packages/shared",
+    "packages/db",
+    "apps/api",
+    "apps/worker",
+    "apps/storefront",
+    "apps/organizer",
+    "apps/admin"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "npm run migrate -w @campaigns/db",
+    "db:bootstrap": "npm run bootstrap -w @campaigns/db",
+    "dev:api": "npm run dev -w @campaigns/api",
+    "dev:worker": "npm run dev -w @campaigns/worker",
+    "dev:storefront": "npm run dev -w @campaigns/storefront",
+    "dev:organizer": "npm run dev -w @campaigns/organizer",
+    "dev:admin": "npm run dev -w @campaigns/admin",
+    "db:reset-test": "npm run reset-test -w @campaigns/db"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "dotenv": "^16.4.7",
+    "eslint": "^9.17.0",
+    "globals": "^15.15.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1",
+    "vitest": "^2.1.8"
+  }
+}
