@@ -20,12 +20,38 @@ export function AuthGate({ children }: { children: ReactNode }) {
   if (status === 'anonymous') return <LoginScreen />;
   if (status === 'mfa_required') return <MfaVerifyScreen />;
   if (status === 'mfa_enrollment_required') return <MfaEnrollScreen />;
+  if (status === 'unavailable') return <UnavailableScreen />;
   return <>{children}</>;
 }
 
 function messageFor(error: unknown): string {
   if (error instanceof ApiClientError) return error.message;
   return 'Não foi possível concluir. Verifique sua conexão e tente novamente.';
+}
+
+/**
+ * A API nao respondeu.
+ *
+ * Tela PROPRIA, e nao a de login. Mandar quem sofreu uma queda de rede para o
+ * formulario de entrada afirma algo que nao foi verificado — "sua sessao
+ * acabou" — e faz a pessoa reentrar sem necessidade. Aqui a interface diz o que
+ * de fato sabe e oferece a unica acao util: tentar de novo.
+ */
+function UnavailableScreen() {
+  return (
+    <div className="auth">
+      <div className="auth__box" role="alert">
+        <h1>Sem conexao com o servidor</h1>
+        <p className="muted">
+          Nao foi possivel confirmar sua sessao. Isso costuma ser falha de rede, e a sua sessao
+          provavelmente continua valida.
+        </p>
+        <button type="button" onClick={() => window.location.reload()}>
+          Tentar novamente
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function LoginScreen() {

@@ -1,6 +1,7 @@
 import { createPool } from '@campaigns/db';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
+import { LoginThrottle } from './lib/loginThrottle.js';
 import { SecretBox } from './lib/secretBox.js';
 
 /** Entrada do processo da API. */
@@ -17,10 +18,19 @@ function main(): void {
     config,
     pool,
     secretBox: new SecretBox(config.MFA_ENCRYPTION_KEY),
+    loginThrottle: new LoginThrottle({
+      windowMs: config.LOGIN_ORIGIN_WINDOW_MINUTES * 60_000,
+      maxFailures: config.LOGIN_ORIGIN_MAX_FAILURES,
+      maxDistinctAccounts: config.LOGIN_ORIGIN_MAX_ACCOUNTS,
+    }),
   });
 
   const server = app.listen(config.PORT, () => {
-    console.log(`API ouvindo em http://localhost:${config.PORT} (${config.NODE_ENV})`);
+    console.log(
+      `[api] ouvindo na porta ${config.PORT} (${config.NODE_ENV}); ` +
+        `origens declaradas: ${config.corsOrigins.length}; ` +
+        `cabecalho de comunidade: ${config.TENANT_HEADER_ENABLED ? 'ligado' : 'desligado'}`,
+    );
   });
 
   // Encerramento limpo: para de aceitar conexoes novas e fecha o pool, para

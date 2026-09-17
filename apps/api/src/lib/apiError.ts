@@ -59,7 +59,7 @@ export class ApiError extends Error {
     return new ApiError('CONFLICT', message);
   }
 
-  static rateLimited(message?: string): ApiError {
-    return new ApiError('RATE_LIMITED', message);
+  static rateLimited(message?: string, details?: unknown): ApiError {
+    return new ApiError('RATE_LIMITED', message, details);
   }
 }

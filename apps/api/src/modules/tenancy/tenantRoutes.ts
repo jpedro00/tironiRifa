@@ -9,6 +9,7 @@ import {
 } from '@campaigns/shared';
 import type { AppDeps } from '../../deps.js';
 import { ApiError } from '../../lib/apiError.js';
+import { isUniqueViolation } from '../../lib/pgError.js';
 import { listTenantAuditEvents, recordAuditEvent } from '../audit/auditService.js';
 import { enqueueOutboxEvent } from '../outbox/outboxService.js';
 
@@ -168,19 +169,31 @@ export function buildTenantHandlers(deps: AppDeps): Record<string, RequestHandle
           throw ApiError.conflict('Já existe uma comunidade com esse identificador.');
         }
 
-        const { rows } = await client.query<{
+        // A verificacao acima resolve o caso comum, mas nao GARANTE nada: entre
+        // ela e o INSERT cabe outra transacao. Quem garante e o indice unico
+        // `tenants_slug_key`, e a corrida perdida e um conflito de negocio —
+        // 409 —, nao uma falha interna.
+        let tenant: {
           id: string;
           slug: string;
           name: string;
           status: string;
           created_at: string;
-        }>(
-          `INSERT INTO tenants (slug, name)
-           VALUES ($1, $2)
-           RETURNING id, slug, name, status::text AS status, created_at`,
-          [body.slug, body.name],
-        );
-        const tenant = rows[0]!;
+        };
+        try {
+          const { rows } = await client.query<typeof tenant>(
+            `INSERT INTO tenants (slug, name)
+             VALUES ($1, $2)
+             RETURNING id, slug, name, status::text AS status, created_at`,
+            [body.slug, body.name],
+          );
+          tenant = rows[0]!;
+        } catch (error) {
+          if (isUniqueViolation(error, 'tenants_slug_key')) {
+            throw ApiError.conflict('Já existe uma comunidade com esse identificador.');
+          }
+          throw error;
+        }
 
         await recordAuditEvent(client, {
           tenantId: null,

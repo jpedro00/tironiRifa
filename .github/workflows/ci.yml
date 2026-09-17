@@ -70,24 +70,24 @@ jobs:
       - name: Migrations em banco vazio
         run: npm run db:migrate
 
+      # Etapa administrativa da fila, separada do runtime do worker de
+      # propósito: o pg-boss precisa de privilégio de criação no banco para se
+      # instalar, e o worker — que roda continuamente — não deve tê-lo.
+      # Ver apps/worker/src/queue.ts.
+      - name: Instalar o schema da fila
+        run: npm run queue:install -w @campaigns/worker
+
+      # UMA execução da suíte, com dois repórteres: o legível, para quem lê o
+      # log, e o JSON, para a verificação de teste pulado logo abaixo. Rodar
+      # `vitest run` duas vezes sobre a mesma coleção dobrava o tempo do CI e
+      # aplicava as migrations de novo, sem cobrir um único teste a mais.
       - name: Testes
-        run: npm test
+        run: npx vitest run --reporter=default --reporter=json --outputFile=.vitest-report.json
+
+      # Rede de segurança: sem banco configurado, a suíte PULA os testes de RLS
+      # em vez de falhar — e um CI verde sem eles seria uma falsa aprovação.
+      - name: Garantir que nenhum teste foi pulado
+        run: node scripts/assert-no-skipped-tests.mjs
 
       - name: Build
         run: npm run build
-
-      # Rede de segurança: se o banco não estiver configurado, a suíte PULA os
-      # testes de RLS em vez de falhar — e um CI verde sem eles seria uma
-      # falsa aprovação. Este passo falha se algum teste foi pulado.
-      - name: Garantir que nenhum teste de banco foi pulado
-        run: |
-          npx vitest run --reporter=json --outputFile=.vitest-report.json
-          node -e "
-            const report = require('./.vitest-report.json');
-            const skipped = report.numPendingTests ?? 0;
-            if (skipped > 0) {
-              console.error('FALHA: ' + skipped + ' teste(s) pulado(s). Os testes de banco precisam rodar no CI.');
-              process.exit(1);
-            }
-            console.log('Nenhum teste pulado. Total: ' + report.numTotalTests);
-          "

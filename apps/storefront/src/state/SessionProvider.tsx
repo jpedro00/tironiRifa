@@ -7,7 +7,13 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { ApiClientError, type PublicTenantBranding, type SessionResponse } from '@campaigns/shared';
+import {
+  ApiClientError,
+  classifySessionFailure,
+  sessionNeed,
+  type PublicTenantBranding,
+  type SessionResponse,
+} from '@campaigns/shared';
 import { api } from '../api.ts';
 
 /**
@@ -23,7 +29,13 @@ import { api } from '../api.ts';
  *                bilhetes depende de compra, que pertence a Fase 2.
  */
 export type TenantStatus = 'loading' | 'resolved' | 'not_found' | 'error';
-export type SessionStatus = 'loading' | 'anonymous' | 'mfa_required' | 'authenticated';
+export type SessionStatus =
+  | 'loading'
+  | 'anonymous'
+  | 'mfa_required'
+  /** Nao foi possivel FALAR com a API — nao e prova de que a sessao acabou. */
+  | 'unavailable'
+  | 'authenticated';
 
 interface StorefrontState {
   readonly tenantStatus: TenantStatus;
@@ -79,13 +91,17 @@ export function StorefrontProvider({ children }: { children: ReactNode }) {
     try {
       const result = await api.call('session');
       setSession(result);
-      setSessionStatus(
-        result.mfaEnrolled && !result.mfaSatisfied ? 'mfa_required' : 'authenticated',
-      );
-    } catch {
-      // Visitante sem sessao e o caso NORMAL na vitrine, nao um erro.
-      setSession(null);
-      setSessionStatus('anonymous');
+      setSessionStatus(sessionNeed(result) === 'nothing' ? 'authenticated' : 'mfa_required');
+    } catch (error) {
+      // Visitante sem sessao e o caso NORMAL na vitrine, nao um erro — mas
+      // "nao consegui perguntar" tambem nao e "visitante". A vitrine e publica
+      // e continua navegavel nos dois casos; o que muda e o que ela AFIRMA.
+      if (classifySessionFailure(error) === 'unauthenticated') {
+        setSession(null);
+        setSessionStatus('anonymous');
+        return;
+      }
+      setSessionStatus('unavailable');
     }
   }, []);
 

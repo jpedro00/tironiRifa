@@ -181,9 +181,8 @@ describe.skipIf(!hasDb)(`RN21 · relay e consumidor ${hasDb ? '' : skipReason}`,
       expect(rows[0]?.published_at).not.toBeNull();
     });
 
-    it('evento que esgota as tentativas fica parado e visivel, nao e descartado', async () => {
-      const { eventId } = await seedTenantAndEvent();
-
+    /** Esgota as tentativas de um evento, forcando-o a ficar disponivel. */
+    async function exhaust(eventId: string): Promise<void> {
       for (let i = 0; i < relayOptions.maxAttempts; i += 1) {
         await owner.query('UPDATE outbox SET available_at = now() WHERE id = $1', [eventId]);
         await runRelayOnce(
@@ -194,9 +193,19 @@ describe.skipIf(!hasDb)(`RN21 · relay e consumidor ${hasDb ? '' : skipReason}`,
           relayOptions,
         );
       }
+    }
 
-      const { rows } = await owner.query<{ published_at: string | null; attempts: number }>(
-        'SELECT published_at, attempts FROM outbox WHERE id = $1',
+    it('evento que esgota as tentativas fica parado e visivel, nao e descartado', async () => {
+      const { eventId } = await seedTenantAndEvent();
+      await exhaust(eventId);
+
+      const { rows } = await owner.query<{
+        published_at: string | null;
+        attempts: number;
+        dead_lettered_at: string | null;
+        last_error: string | null;
+      }>(
+        'SELECT published_at, attempts, dead_lettered_at, last_error FROM outbox WHERE id = $1',
         [eventId],
       );
       // Continua existindo, nao publicado: a prova de que havia trabalho a
@@ -204,6 +213,79 @@ describe.skipIf(!hasDb)(`RN21 · relay e consumidor ${hasDb ? '' : skipReason}`,
       expect(rows).toHaveLength(1);
       expect(rows[0]?.published_at).toBeNull();
       expect(rows[0]?.attempts).toBeGreaterThanOrEqual(relayOptions.maxAttempts);
+      // E marcado como esgotado, nao apenas adiado.
+      expect(rows[0]?.dead_lettered_at).not.toBeNull();
+      expect(rows[0]?.last_error).toContain('falha permanente');
+    });
+
+    it('evento esgotado NAO e reclamado de novo', async () => {
+      // O defeito anterior: `available_at = now() + 1 hora` com
+      // `published_at IS NULL` fazia o relay repescar a mesma linha para
+      // sempre, uma vez por hora. Adiar nao e desistir.
+      const { eventId } = await seedTenantAndEvent();
+      await exhaust(eventId);
+
+      const antes = await owner.query<{ attempts: number }>(
+        'SELECT attempts FROM outbox WHERE id = $1',
+        [eventId],
+      );
+
+      // Mesmo com a linha disponivel e o publisher agora funcionando, o relay
+      // nao a toca: sair do esgotamento exige acao deliberada.
+      await owner.query('UPDATE outbox SET available_at = now() WHERE id = $1', [eventId]);
+      let publicados = 0;
+      const result = await runRelayOnce(
+        worker,
+        async () => {
+          publicados += 1;
+        },
+        relayOptions,
+      );
+
+      expect(publicados).toBe(0);
+      expect(result.published).toBe(0);
+
+      const depois = await owner.query<{ attempts: number; published_at: string | null }>(
+        'SELECT attempts, published_at FROM outbox WHERE id = $1',
+        [eventId],
+      );
+      expect(depois.rows[0]?.attempts).toBe(antes.rows[0]?.attempts);
+      expect(depois.rows[0]?.published_at).toBeNull();
+    });
+
+    it('evento ABAIXO do limite continua elegivel para nova tentativa', async () => {
+      const { eventId } = await seedTenantAndEvent();
+
+      // Uma falha so: longe do limite.
+      await runRelayOnce(
+        worker,
+        async () => {
+          throw new Error('falha passageira');
+        },
+        relayOptions,
+      );
+
+      const parcial = await owner.query<{ attempts: number; dead_lettered_at: string | null }>(
+        'SELECT attempts, dead_lettered_at FROM outbox WHERE id = $1',
+        [eventId],
+      );
+      expect(parcial.rows[0]?.attempts).toBe(1);
+      expect(parcial.rows[0]?.dead_lettered_at).toBeNull();
+
+      await owner.query('UPDATE outbox SET available_at = now() WHERE id = $1', [eventId]);
+      const result = await runRelayOnce(worker, async () => undefined, relayOptions);
+      expect(result.published).toBe(1);
+    });
+
+    it('um evento esgotado nao pode ser marcado como publicado', async () => {
+      // A CHECK do banco impede o estado contraditorio, independentemente do
+      // que o codigo do relay venha a fazer no futuro.
+      const { eventId } = await seedTenantAndEvent();
+      await exhaust(eventId);
+
+      await expect(
+        owner.query('UPDATE outbox SET published_at = now() WHERE id = $1', [eventId]),
+      ).rejects.toThrow();
     });
 
     it('publicar nao marca o evento como CONSUMIDO', async () => {

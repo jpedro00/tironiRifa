@@ -1,0 +1,164 @@
+# =============================================================================
+# Render — infraestrutura de STAGING
+#
+# Blueprint versionado: a infraestrutura nasce do repositorio, nao de cliques
+# num painel. Duas consequencias praticas — a configuracao passa por revisao
+# como qualquer codigo, e recriar o ambiente do zero nao depende de ninguem
+# lembrar o que foi clicado.
+#
+# NAO HA PRODUCAO AQUI. Este arquivo descreve apenas staging.
+#
+# -----------------------------------------------------------------------------
+# TRES PAPEIS DE BANCO, TRES USOS DISTINTOS
+#
+#   DATABASE_ADMIN_URL   dono do schema. Roda bootstrap, migrations e
+#                        `queue:install`. NAO e usado por nenhum processo em
+#                        execucao continua.
+#   DATABASE_URL         `app_user`. A API, e so ela.
+#   WORKER_DATABASE_URL  `app_worker`. O worker, e so ele.
+#
+# Todas as tres sao marcadas `sync: false`: o Render pede o valor na criacao e
+# o guarda cifrado. Credencial NAO entra em arquivo versionado — e por isso que
+# este arquivo pode existir no repositorio.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # API HTTP
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: campaigns-api-staging
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: fase-1-fundacao
+
+    # O build acontece na raiz do monorepo: a API importa @campaigns/shared e
+    # @campaigns/db, que precisam estar compilados antes do typecheck dela.
+    buildCommand: >-
+      npm ci &&
+      npm run build -w @campaigns/shared &&
+      npm run build -w @campaigns/db &&
+      npm run build -w @campaigns/api
+    startCommand: npm start -w @campaigns/api
+
+    # Healthcheck REAL: a rota consulta o banco e informa `database: up|down`.
+    # Ela responde 200 mesmo com o banco fora, de proposito — quem observa
+    # precisa distinguir "API fora" de "API no ar, banco fora".
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: NODE_ENV
+        value: staging
+      - key: PORT
+        value: '10000'
+
+      # Papel RESTRITO da aplicacao. Nunca o dono do schema.
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL
+        value: 'true'
+
+      # 32 bytes em base64. Perder esta chave invalida todos os segundos
+      # fatores ja cadastrados.
+      - key: MFA_ENCRYPTION_KEY
+        sync: false
+
+      # Preencher com as tres URLs do Vercel apos o primeiro deploy dos
+      # frontends. Sem allowlist a API recusa subir em staging.
+      - key: CORS_ORIGINS
+        sync: false
+
+      - key: APP_BASE_DOMAIN
+        value: plataforma.local
+
+      # Frontends e API ficam em SITES diferentes (vercel.app x onrender.com).
+      # `SameSite=None` e o unico valor em que o navegador envia o cookie nessa
+      # topologia; `Secure` e obrigatorio junto, e a configuracao recusa subir
+      # sem ele. Quem barra escrita de origem desconhecida e o originGuard.
+      - key: SESSION_COOKIE_SECURE
+        value: 'true'
+      - key: SESSION_COOKIE_SAMESITE
+        value: none
+
+      # Em staging a API nunca ve o hostname da vitrine no `Host` — os sites
+      # sao diferentes —, entao a resolucao por dominio nao tem o que ler. O
+      # cabecalho e a unica forma de escolher a comunidade nesta topologia.
+      # A configuracao RECUSA este valor em producao.
+      - key: TENANT_HEADER_ENABLED
+        value: 'true'
+
+      - key: LOGIN_MAX_ATTEMPTS
+        value: '5'
+      - key: LOGIN_LOCK_MINUTES
+        value: '15'
+      # Limite por origem, anterior a autenticacao. Ver lib/loginThrottle.ts.
+      - key: LOGIN_ORIGIN_WINDOW_MINUTES
+        value: '15'
+      - key: LOGIN_ORIGIN_MAX_FAILURES
+        value: '20'
+      - key: LOGIN_ORIGIN_MAX_ACCOUNTS
+        value: '5'
+
+  # ---------------------------------------------------------------------------
+  # Worker — relay da outbox e consumidores
+  #
+  # Processo SEPARADO da API, e nao uma thread dentro dela: as duas escalam por
+  # motivos diferentes e falham por motivos diferentes. Um relay travado nao
+  # pode derrubar o atendimento HTTP.
+  # ---------------------------------------------------------------------------
+  - type: worker
+    name: campaigns-worker-staging
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: fase-1-fundacao
+
+    buildCommand: >-
+      npm ci &&
+      npm run build -w @campaigns/shared &&
+      npm run build -w @campaigns/db &&
+      npm run build -w @campaigns/worker
+    startCommand: npm start -w @campaigns/worker
+
+    envVars:
+      - key: NODE_ENV
+        value: staging
+
+      # `app_worker`, nunca a conexao da API. O nome e proprio justamente para
+      # tornar impossivel a troca silenciosa.
+      - key: WORKER_DATABASE_URL
+        sync: false
+      # A fila usa o MESMO papel restrito: o schema `pgboss` ja pertence a ele
+      # (migration 0008), entao criar as tabelas da fila ali e exercicio de
+      # posse, nao privilegio administrativo.
+      - key: QUEUE_DATABASE_URL
+        sync: false
+      - key: QUEUE_SCHEMA
+        value: pgboss
+      - key: DATABASE_SSL
+        value: 'true'
+
+      - key: OUTBOX_POLL_INTERVAL_MS
+        value: '2000'
+      - key: OUTBOX_BATCH_SIZE
+        value: '50'
+      - key: OUTBOX_MAX_ATTEMPTS
+        value: '10'
+      - key: OUTBOX_RETRY_BASE_SECONDS
+        value: '5'
+
+# =============================================================================
+# O QUE ESTE ARQUIVO NAO FAZ, E POR QUE
+#
+# Nao roda migrations no deploy. Migration e DDL, exige o papel DONO do schema,
+# e um processo de execucao continua nao deve carregar essa credencial. O mesmo
+# vale para `queue:install`. As duas coisas sao etapas ADMINISTRATIVAS,
+# executadas deliberadamente antes do deploy:
+#
+#   DATABASE_ADMIN_URL=... npm run db:migrate
+#   QUEUE_ADMIN_DATABASE_URL=... npm run queue:install -w @campaigns/worker
+#
+# Amarrar isso ao `buildCommand` faria cada deploy — inclusive um rollback —
+# tentar aplicar DDL, com a credencial errada e no momento errado.
+# =============================================================================

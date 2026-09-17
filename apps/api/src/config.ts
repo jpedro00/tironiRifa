@@ -10,7 +10,15 @@ import { z } from 'zod';
  * cifragem existem no ambiente ou o processo nao sobe (PROMPT_ASTRA, principio 9).
  */
 const configSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  /**
+   * `staging` e um ambiente de primeira classe, nao um apelido de producao.
+   *
+   * Ele roda exposto na internet, com TLS e dados descartaveis. Separa-lo de
+   * `production` permite afrouxar o que so faz sentido afrouxar num ambiente
+   * sem dado real — hoje, apenas o seletor de comunidade por cabecalho — sem
+   * abrir a mesma porta em producao.
+   */
+  NODE_ENV: z.enum(['development', 'test', 'staging', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
 
   /** Conexao da API: papel RESTRITO app_user, nunca o dono do schema. */
@@ -68,9 +76,49 @@ const configSchema = z.object({
     .default('false')
     .transform((value) => value === 'true'),
 
-  /** Bloqueio por tentativas de login. */
+  /**
+   * `SameSite` do cookie de sessao. PADRAO `lax`.
+   *
+   * POR QUE ISTO E CONFIGURAVEL, E NAO FIXO
+   *
+   * `lax` e o valor correto quando a vitrine e a API vivem no MESMO site — o
+   * navegador manda o cookie e ainda barra POST vindo de outro site.
+   *
+   * Quando os frontends ficam num site e a API noutro (Vercel + Render, por
+   * exemplo), TODA chamada e cross-site: com `lax`, o navegador simplesmente
+   * NAO envia o cookie no `fetch`. O login pareceria funcionar — o `Set-Cookie`
+   * chega — e toda requisicao seguinte voltaria 401. `none` e o unico valor que
+   * descreve honestamente essa topologia.
+   *
+   * O QUE SUBSTITUI A PROTECAO QUE `lax` DAVA
+   *
+   * `SameSite` nunca foi a unica defesa aqui. O `originGuard` recusa com 403,
+   * ANTES do handler, qualquer requisicao com `Origin` fora da allowlist — e
+   * `Origin` e posto pelo navegador e nao pode ser forjado por pagina. Essa
+   * verificacao vale para toda rota, inclusive as de escrita, e nao depende de
+   * `SameSite` nenhum. Trocar para `none` troca um mecanismo por outro que ja
+   * estava de pe, e nao remove a defesa.
+   *
+   * `none` SEM `Secure` e recusado na carga da configuracao: o proprio
+   * navegador descarta esse cookie, entao aceitar a combinacao produziria um
+   * sistema que nao autentica e nao diz por que.
+   */
+  SESSION_COOKIE_SAMESITE: z.enum(['lax', 'strict', 'none']).default('lax'),
+
+  /** Bloqueio por tentativas de login, POR CONTA. */
   LOGIN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   LOGIN_LOCK_MINUTES: z.coerce.number().int().positive().default(15),
+
+  /**
+   * Limite por ORIGEM, aplicado antes da autenticacao.
+   *
+   * Defende a plataforma de uma origem que ataca MUITAS contas — o bloqueio por
+   * conta, sozinho, torna barato trancar contas alheias. Ver
+   * `lib/loginThrottle.ts`.
+   */
+  LOGIN_ORIGIN_WINDOW_MINUTES: z.coerce.number().int().positive().default(15),
+  LOGIN_ORIGIN_MAX_FAILURES: z.coerce.number().int().positive().default(20),
+  LOGIN_ORIGIN_MAX_ACCOUNTS: z.coerce.number().int().positive().default(5),
 
   /** Emissor exibido no aplicativo autenticador. */
   MFA_ISSUER: z.string().default('Campanhas & Comunidades'),
@@ -88,6 +136,35 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         message:
           'TENANT_HEADER_ENABLED nao pode ser true em producao: o cabecalho deixaria o cliente escolher a comunidade, ignorando o dominio.',
         path: ['TENANT_HEADER_ENABLED'],
+      },
+    )
+    .refine((value) => !(value.SESSION_COOKIE_SAMESITE === 'none' && !value.SESSION_COOKIE_SECURE), {
+      message:
+        'SESSION_COOKIE_SAMESITE=none exige SESSION_COOKIE_SECURE=true: o navegador DESCARTA um cookie SameSite=None sem Secure, e a sessao nunca chegaria a existir.',
+      path: ['SESSION_COOKIE_SAMESITE'],
+    })
+    .refine(
+      (value) =>
+        !(
+          (value.NODE_ENV === 'production' || value.NODE_ENV === 'staging') &&
+          !value.SESSION_COOKIE_SECURE
+        ),
+      {
+        message:
+          'SESSION_COOKIE_SECURE precisa ser true em staging e em producao: sem Secure o cookie de sessao viaja em texto claro.',
+        path: ['SESSION_COOKIE_SECURE'],
+      },
+    )
+    .refine(
+      (value) =>
+        !(
+          (value.NODE_ENV === 'production' || value.NODE_ENV === 'staging') &&
+          value.CORS_ORIGINS.trim() === ''
+        ),
+      {
+        message:
+          'CORS_ORIGINS nao pode ficar vazio em staging nem em producao: sem allowlist, nenhum painel interno consegue falar com a API.',
+        path: ['CORS_ORIGINS'],
       },
     )
     .safeParse(env);

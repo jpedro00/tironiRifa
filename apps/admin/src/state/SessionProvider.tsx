@@ -8,7 +8,8 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  ApiClientError,
+  classifySessionFailure,
+  sessionNeed,
   type LoginResponse,
   type PlatformPermission,
   type SessionResponse,
@@ -30,6 +31,11 @@ export type SessionStatus =
   | 'mfa_required'
   | 'mfa_enrollment_required'
   | 'no_platform_access'
+  /**
+   * Nao foi possivel FALAR com a API. Estado proprio, separado de
+   * 'anonymous': erro de rede nao e prova de que a sessao acabou.
+   */
+  | 'unavailable'
   | 'authenticated';
 
 interface SessionState {
@@ -45,12 +51,22 @@ interface SessionState {
 
 const SessionContext = createContext<SessionState | null>(null);
 
+/**
+ * RN12 na tela. A regra mora em `@campaigns/shared` e tem teste proprio — os
+ * tres frontends faziam esta mesma conta, cada um do seu jeito.
+ */
 function statusFromSession(session: SessionResponse): SessionStatus {
-  // RN12: todo papel de plataforma exige segundo fator.
-  if (session.mfaRequired && !session.mfaSatisfied) {
-    return session.mfaEnrolled ? 'mfa_required' : 'mfa_enrollment_required';
+  // RN12 antes de tudo: todo papel de plataforma exige segundo fator.
+  switch (sessionNeed(session)) {
+    case 'mfa_code':
+      return 'mfa_required';
+    case 'mfa_enrollment':
+      return 'mfa_enrollment_required';
+    default:
+      break;
   }
-  if (session.mfaEnrolled && !session.mfaSatisfied) return 'mfa_required';
+  // Credencial valida e MFA satisfeito ainda NAO abrem este console: o
+  // privilegio de plataforma e concedido um a um em `platform_admins`.
   if (session.platformRoles.length === 0) return 'no_platform_access';
   return 'authenticated';
 }
@@ -65,13 +81,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setSession(result);
       setStatus(statusFromSession(result));
     } catch (error) {
-      if (error instanceof ApiClientError && error.code === 'UNAUTHENTICATED') {
+      // Erro de rede NAO pode fingir que a pessoa saiu. Mandar quem sofreu uma
+      // queda de tres segundos para a tela de login faz a pessoa reentrar
+      // achando que a sessao expirou — e perde o que estava na tela.
+      if (classifySessionFailure(error) === 'unauthenticated') {
         setSession(null);
         setStatus('anonymous');
         return;
       }
-      setSession(null);
-      setStatus('anonymous');
+      setStatus('unavailable');
     }
   }, []);
 

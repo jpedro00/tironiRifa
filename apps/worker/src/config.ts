@@ -3,23 +3,29 @@ import { z } from 'zod';
 /**
  * Configuracao do worker.
  *
- * DUAS conexoes, de proposito:
+ * DUAS conexoes, ambas com o papel `app_worker`:
  *
- *   DATABASE_URL        papel `app_worker`. Le a outbox, grava
- *                       `event_consumptions` e executa o efeito do consumidor.
- *                       Nao e dono de tabela e nao tem BYPASSRLS.
+ *   WORKER_DATABASE_URL  le a outbox, grava `event_consumptions` e executa o
+ *                        efeito do consumidor. Nao e dono das tabelas de
+ *                        negocio e nao tem BYPASSRLS.
  *
- *   QUEUE_DATABASE_URL  usada APENAS pelo pg-boss. A fila cria e mantem o
- *                       proprio schema, o que exige privilegio de criacao —
- *                       privilegio que o papel de negocio nao deve ter.
+ *   QUEUE_DATABASE_URL   usada APENAS pelo pg-boss, que mantem as proprias
+ *                        tabelas dentro do schema `pgboss`. O schema e criado
+ *                        pela MIGRATION, com `app_worker` como dono (0007/0008):
+ *                        a fila exerce POSSE sobre o proprio schema, nao
+ *                        privilegio administrativo sobre o banco. Nenhuma
+ *                        conexao de superusuario participa do runtime.
  *
- * Separar as duas impede que a infraestrutura de fila obrigue o papel que toca
- * dado de negocio a receber permissao de DDL.
+ * POR QUE NAO `DATABASE_URL`: essa chave ja significa "a conexao da API" no
+ * `.env` da raiz, e ela aponta para `app_user`. Um worker que lesse `DATABASE_URL`
+ * subiria com o papel ERRADO a partir do arquivo de exemplo — e falharia no
+ * primeiro `UPDATE outbox`, porque `app_user` nao tem esse privilegio (0006). Um
+ * nome proprio torna impossivel a troca silenciosa.
  */
 const configSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  NODE_ENV: z.enum(['development', 'test', 'staging', 'production']).default('development'),
 
-  DATABASE_URL: z.string().min(1, 'DATABASE_URL e obrigatoria.'),
+  WORKER_DATABASE_URL: z.string().min(1, 'WORKER_DATABASE_URL e obrigatoria.'),
   QUEUE_DATABASE_URL: z.string().min(1, 'QUEUE_DATABASE_URL e obrigatoria.'),
   DATABASE_SSL: z
     .enum(['true', 'false'])

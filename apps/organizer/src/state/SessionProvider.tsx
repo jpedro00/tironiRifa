@@ -8,7 +8,8 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  ApiClientError,
+  classifySessionFailure,
+  sessionNeed,
   type LoginResponse,
   type SessionResponse,
   type TenantContextResponse,
@@ -33,6 +34,11 @@ export type SessionStatus =
   | 'anonymous'
   | 'mfa_required'
   | 'mfa_enrollment_required'
+  /**
+   * Nao foi possivel FALAR com a API. Estado proprio, separado de
+   * 'anonymous': erro de rede nao e prova de que a sessao acabou.
+   */
+  | 'unavailable'
   | 'authenticated';
 
 interface SessionState {
@@ -52,13 +58,19 @@ interface SessionState {
 
 const SessionContext = createContext<SessionState | null>(null);
 
+/**
+ * RN12 na tela. A regra mora em `@campaigns/shared` e tem teste proprio — os
+ * tres frontends faziam esta mesma conta, cada um do seu jeito.
+ */
 function statusFromSession(session: SessionResponse): SessionStatus {
-  if (session.mfaRequired && !session.mfaSatisfied) {
-    return session.mfaEnrolled ? 'mfa_required' : 'mfa_enrollment_required';
+  switch (sessionNeed(session)) {
+    case 'mfa_code':
+      return 'mfa_required';
+    case 'mfa_enrollment':
+      return 'mfa_enrollment_required';
+    default:
+      return 'authenticated';
   }
-  // Fator cadastrado por escolha propria tambem precisa ser satisfeito.
-  if (session.mfaEnrolled && !session.mfaSatisfied) return 'mfa_required';
-  return 'authenticated';
 }
 
 export function SessionProvider({ children }: { children: ReactNode }) {
@@ -75,14 +87,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setSession(result);
       setStatus(statusFromSession(result));
     } catch (error) {
-      if (error instanceof ApiClientError && error.code === 'UNAUTHENTICATED') {
+      // Erro de rede NAO pode fingir que a pessoa saiu. Mandar quem sofreu uma
+      // queda de tres segundos para a tela de login faz a pessoa reentrar
+      // achando que a sessao expirou — e perde o que estava na tela.
+      if (classifySessionFailure(error) === 'unauthenticated') {
         setSession(null);
         setStatus('anonymous');
         return;
       }
-      // Erro de rede nao deve fingir que a pessoa esta deslogada.
-      setSession(null);
-      setStatus('anonymous');
+      setStatus('unavailable');
     }
   }, []);
 

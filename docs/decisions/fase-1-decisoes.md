@@ -210,6 +210,17 @@ regra:
 | S6 | `AGENDADA` continua identificada como suposição. Está no catálogo de estados; a ativação **não** foi implementada. |
 | S8 | Matriz detalhada do Super Admin. |
 
+### Limites conhecidos, registrados na validação total
+
+Reais, e nenhum deles impede a fundação:
+
+| Item | Situação |
+|---|---|
+| Telas dos frontends sem teste de renderização | A lógica de fundação está em `@campaigns/shared` e é coberta; os componentes não. Cobri-los exigiria jsdom e uma biblioteca de teste de componente. |
+| Bloqueio de conta como negação de serviço | A resposta uniforme impede descobrir **quais** contas existem, mas quem já souber um e-mail válido pode trancá-lo. Mitigar exige limite por origem antes da autenticação. |
+| Cache no `originGuard` | Cada `Origin` desconhecida consulta o banco. |
+| Encerramento gracioso do worker | Verificado pelo código e pela liberação das conexões; `SIGTERM`/`SIGINT` não são entregáveis a um processo Node pelo shell no Windows. Trivial de exercitar no Linux, na rodada de staging. |
+
 ---
 
 ## 10. Defeitos encontrados na execução com PostgreSQL real e corrigidos
@@ -266,6 +277,179 @@ O teste envelhecia só `expires_at`, violando
 `sessions_expires_after_creation (expires_at > created_at)`. A CHECK estava
 certa; o teste é que criava uma sessão impossível. Agora a sessão é envelhecida
 por inteiro, como uma sessão antiga de verdade.
+
+---
+
+## 10bis. Defeitos encontrados na VALIDAÇÃO TOTAL e corrigidos
+
+A validação completa com PostgreSQL real expôs cinco defeitos de implementação,
+um de configuração e três inconsistências entre documentação e código. Nenhum
+foi contornado afrouxando regra.
+
+### D-5 · RN12 contornável por elevação de papel — IMPLEMENTAÇÃO, crítico
+
+**Observado**, reproduzido contra a API real:
+
+```text
+SUPPORT loga (sem MFA) → promovido a OWNER → GET /api/tenant/audit-events → 200
+usuário comum loga     → recebe PLATFORM_OPERATIONS → GET /api/platform/tenants → 200
+```
+
+O segundo atravessa a fronteira da plataforma inteira.
+
+**Causa raiz.** A sessão de quem não exigia MFA nascia com `mfa_satisfied_at =
+now()`. `authenticateSession` recalculava `mfaRequired` e `mfaEnrolled` a cada
+requisição, mas lia a marca **congelada no login**. A trava
+`mfaRequired && !mfaSatisfied` nunca disparava.
+
+A confusão é de significado: a coluna representava duas coisas diferentes —
+"comprovou o fator" e "não precisava comprovar".
+
+**Correção.** `mfa_satisfied_at` passa a significar **exclusivamente** "esta
+sessão apresentou e validou um segundo fator". A sessão nasce sempre com a marca
+nula. A autorização pergunta separadamente "precisa?" e "comprovou?", e só
+bloqueia quando a primeira é sim e a segunda é não. Promoção de papel vale na
+requisição seguinte, sem logout.
+
+Quem não está sob RN12 não foi afetado: há teste cobrindo marketing, suporte e
+operador usando o painel normalmente.
+
+### D-6 · A sessão não rotacionava o token na elevação — IMPLEMENTAÇÃO
+
+Completar o segundo fator elevava a sessão **mantendo o mesmo token**. Um token
+capturado antes da verificação virava sessão privilegiada no instante em que a
+pessoa legítima completasse o MFA — sem que quem o capturou precisasse do fator.
+
+**Correção.** O `token_hash` é substituído na elevação. A linha da sessão
+permanece (o identificador continua ligando a trilha ao mesmo episódio de
+acesso); o que muda é o segredo portador.
+
+### D-7 · Cadastro do MFA sem as defesas da verificação — IMPLEMENTAÇÃO
+
+`confirmMfaEnrollment` não tinha bloqueio por tentativas nem anti-replay, embora
+termine em **sessão elevada** exatamente como a verificação. Um atacante com a
+senha escolheria o endpoint mais fraco.
+
+**Correção.** Os dois fluxos passaram a compartilhar as mesmas funções de
+bloqueio e o mesmo contador — contadores independentes dariam o dobro de
+tentativas.
+
+### D-8 · O bloqueio de conta revelava a existência do e-mail — IMPLEMENTAÇÃO
+
+`429 RATE_LIMITED` para conta bloqueada contra `401` para e-mail inexistente.
+Bastava gastar as tentativas de um endereço e ler o código de status.
+
+**Correção.** Resposta uniforme para toda recusa. A senha é verificada antes de
+qualquer decisão, para o tempo não denunciar o caso. Tentativa contra conta já
+bloqueada não é contabilizada — contabilizar empurrava `locked_until` para
+frente a cada requisição, e qualquer um manteria uma conta trancada para sempre.
+
+O bloqueio continua existindo. O que some é o sinal externo.
+
+**Limite que permanece:** quem já souber um e-mail válido pode trancá-lo.
+Registrado no README; mitigar exige limite por origem antes da autenticação.
+
+### D-9 · A policy de trilha de identidade era inoperante — IMPLEMENTAÇÃO
+
+A `0007` criou `audit_identity_insert` para `action LIKE 'auth.%'`, mas nenhum
+evento de identidade era gravado. Ao implementá-los, a inserção era recusada com
+`new row violates row-level security policy` **mesmo satisfazendo todas as
+condições da policy de INSERT**.
+
+**Causa raiz, e ela não é óbvia:** `recordAuditEvent` usava `INSERT ... RETURNING
+id`. O `RETURNING` faz a linha recém-inserida passar **também pela policy de
+SELECT** — e `audit_events_select` só enxerga o que pertence a uma comunidade. A
+linha era aceita na escrita e recusada na leitura, e o PostgreSQL relata os dois
+casos com a **mesma** mensagem, o que faz o erro parecer recusa de escrita.
+
+**Correção.** A trilha passou a ser inserida sem `RETURNING`. Nenhum chamador
+usava o identificador devolvido. Numa tabela somente-inserção, ler de volta a
+linha para confirmar que ela foi escrita acopla escrita a leitura sem motivo — e
+obrigaria a abrir leitura só para isso.
+
+### D-10 · `apps/worker` inteiro desalinhado — CONFIGURAÇÃO
+
+O `package.json` apontava para `src/main.ts`, `dist/main.js` e `dist/index.js`;
+o arquivo real é `src/worker.ts`. `npm run dev:worker` falhava com
+`ERR_MODULE_NOT_FOUND`. Corrigido para a implementação real; `main`, `types` e
+`exports` foram removidos — o worker é uma **aplicação**, nada o importa como
+biblioteca. A pasta vazia `src/jobs/` foi removida: os consumidores vivem em
+`src/consumers/`, e pasta vazia sugere trabalho que não existe.
+
+Junto com ele, um erro garantido em produção: o worker lia `DATABASE_URL`, que no
+`.env` da raiz é a conexão da **API** (`app_user`). Subiria com o papel errado e
+falharia no primeiro `UPDATE outbox`. Passou a ler `WORKER_DATABASE_URL`.
+
+### D-11 · "Esgotou as tentativas" não tirava o evento do fluxo — IMPLEMENTAÇÃO
+
+O relay empurrava `available_at` uma hora para frente. Como o critério de
+varredura é "não publicado e disponível", o evento voltava a ser reclamado a cada
+hora, **indefinidamente**. O comentário dizia "fica parado"; o código dizia outra
+coisa.
+
+**Correção.** Coluna `dead_lettered_at` (0008), com CHECK que impede o estado
+contraditório "entregue à fila e esgotado". O evento sai do fluxo de forma
+inequívoca e permanece visível para inspeção — sair do esgotamento exige ação
+deliberada. O índice de varredura foi refeito para refletir o novo critério.
+
+### D-12 · Privilégios do pg-boss: três afirmações incompatíveis — ARQUITETURA
+
+O `.env.example` sugeria superusuário; `queue.ts` afirmava que `app_worker` não
+recebe DDL; a `0007` dava a **posse** do schema `pgboss` ao `app_worker`.
+
+**Fato descoberto na validação:** `CREATE SCHEMA IF NOT EXISTS` exige `CREATE` no
+**banco** mesmo quando o schema já existe — o PostgreSQL confere o privilégio
+antes de considerar o `IF NOT EXISTS`. Logo, ou o worker recebe privilégio de
+criação no banco, ou a instalação é uma etapa à parte.
+
+**Decisão:** etapa à parte, como manda o princípio de menor privilégio para um
+processo de execução contínua.
+
+```text
+INSTALAÇÃO  npm run queue:install   papel administrativo, uma vez
+RUNTIME     npm run dev:worker      app_worker, sem DDL no banco
+```
+
+O instalador cria os objetos e **transfere a posse** para `app_worker` — é isso
+que o dispensa de GRANTs avulsos (que precisariam de revisão a cada versão do
+pg-boss) e o deixa aplicar as migrations de versão da fila sem nunca poder criar
+um schema novo. O runtime recusa subir se a fila não estiver instalada, com a
+instrução do que fazer, em vez de tropeçar num `permission denied` cru.
+
+Há teste provando que o papel do worker **não** consegue criar schema.
+
+### D-13 · A bancada de teste nunca declarava `CORS_ORIGINS` — TESTE
+
+`createHarness` chamava `loadConfig` sem a chave, então `config.corsOrigins`
+nascia vazio: o teste do ramo positivo do `originGuard` falhava **por
+construção**, em qualquer máquina e no CI, e o caminho de allowlist ficava sem
+cobertura nenhuma. Corrigido com uma allowlist explícita de domínios `.test`
+(RFC 2606) e cobertura dos casos que faltavam, incluindo lista vazia e preflight.
+
+### D-14 · Erro de rede tratado como logout — IMPLEMENTAÇÃO (frontends)
+
+O comentário dizia "erro de rede não deve fingir que a pessoa está deslogada" e
+as duas linhas seguintes faziam exatamente isso. Uma queda de três segundos
+derrubava a interface para a tela de login.
+
+**Correção.** `classifySessionFailure` distingue "o servidor respondeu que não há
+sessão" de "não consegui perguntar", e os três frontends ganharam o estado
+`unavailable`, com tela própria e ação de tentar novamente. A regra vive em
+`@campaigns/shared` e tem teste — os três frontends mantinham a mesma conta em
+três cópias, que já haviam divergido.
+
+### D-15 · Corrida no slug da comunidade — IMPLEMENTAÇÃO
+
+`SELECT` seguido de `INSERT` devolvia 500 quando duas requisições simultâneas
+passavam pela verificação. A constraint continua sendo a autoridade; a violação
+de unicidade passou a ser traduzida para **409**.
+
+### D-16 · O CI rodava a suíte inteira duas vezes — CI
+
+Uma execução para os humanos lerem e outra só para gerar o relatório JSON da
+verificação de teste pulado. Dobrava o tempo e reaplicava as migrations sem
+cobrir um teste a mais. Agora é **uma** execução com dois repórteres, e a
+verificação lê o relatório dela.
 
 ---
 

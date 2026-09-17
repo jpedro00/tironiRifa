@@ -25,6 +25,14 @@ import type { OutboxEventType } from '@campaigns/shared';
  *   idempotencia do CONSUMIDOR — nao ha promessa de "exatamente uma vez", e
  *   nenhuma constraint sozinha a produziria.
  *
+ * ESGOTAMENTO (dead-letter): passado `maxAttempts`, o evento recebe
+ * `dead_lettered_at` e sai do fluxo. Antes disso a rotina apenas empurrava
+ * `available_at` uma hora para frente — e como o criterio de varredura e
+ * "nao publicado e disponivel", o evento voltava a ser reclamado a cada hora,
+ * para sempre. Isso nao e dead-letter: e um laco infinito lento, que mascara
+ * o problema em vez de expo-lo. A linha continua na tabela, visivel; o que
+ * cessa e a tentativa automatica.
+ *
  * `FOR UPDATE SKIP LOCKED` permite varios relays em paralelo sem que dois
  * peguem a mesma linha.
  */
@@ -62,6 +70,7 @@ async function claimBatch(client: PoolClient, batchSize: number): Promise<Outbox
     `SELECT id, tenant_id, event_type, payload, attempts
        FROM outbox
       WHERE published_at IS NULL
+        AND dead_lettered_at IS NULL
         AND available_at <= now()
       ORDER BY available_at, id
       LIMIT $1
@@ -115,11 +124,15 @@ export async function runRelayOnce(
           // Esgotou as tentativas. O evento NAO e descartado nem marcado como
           // publicado: fica parado, visivel, para inspecao. Descartar aqui
           // apagaria a unica prova de que algo precisava acontecer.
+          //
+          // `dead_lettered_at` e o que o tira do fluxo de verdade. Sem essa
+          // marca, empurrar `available_at` apenas adia — o proximo
+          // `claimBatch` reclamaria a mesma linha de novo, indefinidamente.
           await client.query(
             `UPDATE outbox
                 SET attempts = $2,
                     last_error = $3,
-                    available_at = now() + interval '1 hour'
+                    dead_lettered_at = now()
               WHERE id = $1`,
             [row.id, attempts, message.slice(0, 2000)],
           );

@@ -21,6 +21,14 @@ export function errorHandler() {
     const requestId = req.context?.requestId ?? 'sem-id';
 
     if (error instanceof ApiError) {
+      // `Retry-After` e a forma padrao de dizer QUANDO tentar de novo. Sem ele,
+      // um cliente honesto so tem a opcao de insistir — que e exatamente o que o
+      // limite esta tentando evitar.
+      const details = error.details as { retryAfterSeconds?: unknown } | undefined;
+      if (error.code === 'RATE_LIMITED' && typeof details?.retryAfterSeconds === 'number') {
+        res.setHeader('Retry-After', String(Math.max(1, Math.ceil(details.retryAfterSeconds))));
+      }
+
       const body: ApiErrorBody = {
         error: {
           code: error.code,

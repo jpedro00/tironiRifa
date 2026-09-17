@@ -2,17 +2,21 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import {
   cleanup,
+  confirmMfaEnrollment,
   createHarness,
   currentCode,
   grantMembership,
   grantPlatformRole,
   hasTestDatabase,
+  identityAuditActions,
   loginAs,
   seedAccount,
   seedConfirmedTotp,
   seedTenantWithSlug,
   skipReason,
   unique,
+  verifyMfa,
+  TEST_CORS_ORIGINS,
   type Harness,
 } from './helpers/apiHarness.js';
 
@@ -100,11 +104,90 @@ describe.skipIf(!hasTestDatabase)(`API · autenticacao e autorizacao ${
           .post('/api/auth/login')
           .send({ email: account.email, password: 'errada' });
       }
+
+      // O bloqueio e REAL: nem a senha correta abre sessao enquanto durar.
       const res = await request(harness.app)
         .post('/api/auth/login')
         .send({ email: account.email, password: account.password });
-      expect(res.status).toBe(429);
-      expect(res.body.error.code).toBe('RATE_LIMITED');
+      expect(res.status).toBe(401);
+
+      const { rows } = await harness.owner.query<{ locked_until: string | null }>(
+        'SELECT locked_until FROM user_credentials WHERE user_id = $1',
+        [account.userId],
+      );
+      expect(rows[0]?.locked_until, 'a conta deveria estar bloqueada no banco').not.toBeNull();
+
+      const sessions = await harness.owner.query('SELECT 1 FROM sessions WHERE user_id = $1', [
+        account.userId,
+      ]);
+      expect(sessions.rows).toHaveLength(0);
+    });
+
+    it('a conta BLOQUEADA responde igual a um e-mail inexistente', async () => {
+      // Devolver 429 aqui entregaria uma lista de e-mails validos: bastaria
+      // gastar as tentativas de um endereco e ler o codigo de status.
+      const account = await seedAccount(harness.owner);
+      for (let i = 0; i < harness.config.LOGIN_MAX_ATTEMPTS; i += 1) {
+        await request(harness.app)
+          .post('/api/auth/login')
+          .send({ email: account.email, password: 'errada' });
+      }
+
+      const locked = await request(harness.app)
+        .post('/api/auth/login')
+        .send({ email: account.email, password: account.password });
+      const ghost = await request(harness.app)
+        .post('/api/auth/login')
+        .send({ email: `${unique('ghost-')}@example.com`, password: account.password });
+
+      expect(locked.status).toBe(ghost.status);
+      expect(locked.body).toEqual(ghost.body);
+      expect(locked.body.error.code).toBe('UNAUTHENTICATED');
+    });
+
+    it('insistir numa conta bloqueada NAO estende o bloqueio', async () => {
+      // Contabilizar a tentativa de quem ja esta bloqueado empurraria
+      // `locked_until` para frente a cada requisicao: qualquer um manteria uma
+      // conta conhecida trancada para sempre, apenas insistindo.
+      const account = await seedAccount(harness.owner);
+      for (let i = 0; i < harness.config.LOGIN_MAX_ATTEMPTS; i += 1) {
+        await request(harness.app)
+          .post('/api/auth/login')
+          .send({ email: account.email, password: 'errada' });
+      }
+
+      const readLock = async (): Promise<string> => {
+        const { rows } = await harness.owner.query<{ locked_until: string }>(
+          'SELECT locked_until FROM user_credentials WHERE user_id = $1',
+          [account.userId],
+        );
+        return rows[0]!.locked_until;
+      };
+
+      const before = await readLock();
+      for (let i = 0; i < 3; i += 1) {
+        await request(harness.app)
+          .post('/api/auth/login')
+          .send({ email: account.email, password: 'errada-de-novo' });
+      }
+      expect(await readLock()).toBe(before);
+    });
+
+    it('a conta INATIVA responde igual a um e-mail inexistente', async () => {
+      const account = await seedAccount(harness.owner);
+      await harness.owner.query("UPDATE users SET status = 'DISABLED' WHERE id = $1", [
+        account.userId,
+      ]);
+
+      const inactive = await request(harness.app)
+        .post('/api/auth/login')
+        .send({ email: account.email, password: account.password });
+      const ghost = await request(harness.app)
+        .post('/api/auth/login')
+        .send({ email: `${unique('ghost-')}@example.com`, password: account.password });
+
+      expect(inactive.status).toBe(ghost.status);
+      expect(inactive.body).toEqual(ghost.body);
     });
   });
 
@@ -293,15 +376,13 @@ describe.skipIf(!hasTestDatabase)(`API · autenticacao e autorizacao ${
       expect(blocked.status).toBe(403);
       expect(blocked.body.error.code).toBe('MFA_REQUIRED');
 
-      const verify = await request(harness.app)
-        .post('/api/auth/mfa/verify')
-        .set('Cookie', login.cookie)
-        .send({ code: await currentCode(secret) });
-      expect(verify.status).toBe(200);
+      // A elevacao rotaciona o token: quem segue e o cookie NOVO.
+      const verified = await verifyMfa(harness, login.cookie, await currentCode(secret));
+      expect(verified.status).toBe(200);
 
       const allowed = await request(harness.app)
         .get('/api/tenant/context')
-        .set('Cookie', login.cookie)
+        .set('Cookie', verified.cookie)
         .set('x-tenant-slug', slug);
       expect(allowed.status).toBe(200);
       expect(allowed.body.roles).toContain('OWNER');
@@ -429,14 +510,18 @@ describe.skipIf(!hasTestDatabase)(`API · autenticacao e autorizacao ${
       expect(typeof start.body.secret).toBe('string');
       expect(start.body.otpauthUri).toContain('otpauth://totp/');
 
-      const confirm = await request(harness.app)
-        .post('/api/auth/mfa/enroll/confirm')
-        .set('Cookie', cookie)
-        .send({ code: await currentCode(start.body.secret) });
-      expect(confirm.status).toBe(200);
+      const confirmed = await confirmMfaEnrollment(
+        harness,
+        cookie,
+        await currentCode(start.body.secret),
+      );
+      expect(confirmed.status).toBe(200);
 
-      // Cadastrar e confirmar ja satisfaz o fator na sessao corrente.
-      const session = await request(harness.app).get('/api/auth/session').set('Cookie', cookie);
+      // Cadastrar e confirmar ja satisfaz o fator na sessao corrente — mas a
+      // confirmacao ELEVA a sessao, entao quem segue e o cookie rotacionado.
+      const session = await request(harness.app)
+        .get('/api/auth/session')
+        .set('Cookie', confirmed.cookie);
       expect(session.body.mfaSatisfied).toBe(true);
       expect(session.body.mfaEnrolled).toBe(true);
     });
@@ -599,13 +684,13 @@ describe.skipIf(!hasTestDatabase)(`API · autenticacao e autorizacao ${
       const secret = await seedConfirmedTotp(harness.owner, account.userId);
 
       const { cookie } = await loginAs(harness, account);
-      await request(harness.app)
-        .post('/api/auth/mfa/verify')
-        .set('Cookie', cookie)
-        .send({ code: await currentCode(secret) });
+      const elevado = await verifyMfa(harness, cookie, await currentCode(secret));
+      expect(elevado.status).toBe(200);
 
       // Dono da comunidade, com MFA satisfeito: ainda assim nao e Super Admin.
-      const res = await request(harness.app).get('/api/platform/tenants').set('Cookie', cookie);
+      const res = await request(harness.app)
+        .get('/api/platform/tenants')
+        .set('Cookie', elevado.cookie);
       expect(res.status).toBe(403);
       expect(res.body.error.code).toBe('FORBIDDEN');
     });
@@ -621,12 +706,12 @@ describe.skipIf(!hasTestDatabase)(`API · autenticacao e autorizacao ${
       const secret = await seedConfirmedTotp(harness.owner, account.userId);
 
       const { cookie } = await loginAs(harness, account);
-      await request(harness.app)
-        .post('/api/auth/mfa/verify')
-        .set('Cookie', cookie)
-        .send({ code: await currentCode(secret) });
+      const elevado = await verifyMfa(harness, cookie, await currentCode(secret));
+      expect(elevado.status).toBe(200);
 
-      const before = await request(harness.app).get('/api/platform/tenants').set('Cookie', cookie);
+      const before = await request(harness.app)
+        .get('/api/platform/tenants')
+        .set('Cookie', elevado.cookie);
       expect(before.status).toBe(200);
 
       await harness.owner.query(
@@ -634,7 +719,9 @@ describe.skipIf(!hasTestDatabase)(`API · autenticacao e autorizacao ${
         [account.userId],
       );
 
-      const after = await request(harness.app).get('/api/platform/tenants').set('Cookie', cookie);
+      const after = await request(harness.app)
+        .get('/api/platform/tenants')
+        .set('Cookie', elevado.cookie);
       expect(after.status).toBe(403);
     });
   });
@@ -776,6 +863,540 @@ describe.skipIf(!hasTestDatabase)(`API · autenticacao e autorizacao ${
         .get('/api/health')
         .set('Origin', 'https://comunidade-que-nao-existe.plataforma.local');
       expect(res.status).toBe(403);
+    });
+
+    it('a allowlist e exatamente a lista declarada, nao um prefixo dela', async () => {
+      // Um `startsWith` deixaria "https://organizer.test.atacante.example"
+      // passar. A comparacao e por origem inteira.
+      for (const origem of [
+        `${TEST_CORS_ORIGINS[0]}.atacante.example`,
+        `${TEST_CORS_ORIGINS[0]}evil`,
+        'http://organizer.test', // esquema diferente
+      ]) {
+        const res = await request(harness.app).get('/api/health').set('Origin', origem);
+        expect(res.status, `${origem} nao deveria ser aceita`).toBe(403);
+      }
+    });
+
+    it('preflight de origem declarada responde 204 com os cabecalhos', async () => {
+      const origin = TEST_CORS_ORIGINS[0];
+      const res = await request(harness.app).options('/api/auth/login').set('Origin', origin);
+
+      expect(res.status).toBe(204);
+      expect(res.headers['access-control-allow-origin']).toBe(origin);
+      expect(res.headers['access-control-allow-credentials']).toBe('true');
+      expect(res.headers['access-control-allow-methods']).toContain('POST');
+    });
+
+    it('preflight de origem desconhecida e recusado', async () => {
+      const res = await request(harness.app)
+        .options('/api/auth/login')
+        .set('Origin', 'https://site-malicioso.example');
+      expect(res.status).toBe(403);
+      expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    });
+
+    it('a resposta liberada declara Vary: Origin', async () => {
+      // Sem `Vary`, um cache intermediario serviria a resposta de uma origem
+      // para outra — e o cabecalho de liberacao viajaria junto.
+      const res = await request(harness.app).get('/api/health').set('Origin', TEST_CORS_ORIGINS[1]);
+      expect(res.status).toBe(200);
+      expect(res.headers['vary']).toContain('Origin');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Allowlist VAZIA: instalacao que nao declarou painel interno nenhum
+  // -------------------------------------------------------------------------
+  describe('controle de origem · allowlist vazia', () => {
+    let semLista: Harness;
+
+    beforeAll(async () => {
+      semLista = await createHarness({ corsOrigins: [] });
+    });
+
+    afterAll(async () => {
+      await semLista?.close();
+    });
+
+    it('lista vazia nao libera nada por omissao', async () => {
+      // O erro que se quer evitar e o oposto do intuitivo: "lista vazia" nao
+      // pode significar "sem restricao".
+      for (const origem of [...TEST_CORS_ORIGINS, 'https://qualquer-coisa.example']) {
+        const res = await request(semLista.app).get('/api/health').set('Origin', origem);
+        expect(res.status, `${origem} deveria ser recusada`).toBe(403);
+      }
+    });
+
+    it('com lista vazia, o dominio da comunidade continua sendo origem valida', async () => {
+      // O caminho white-label nao depende da lista: e por isso que a lista pode
+      // ficar vazia numa instalacao sem paineis internos proprios.
+      const slug = unique('vazia-');
+      await seedTenantWithSlug(semLista.owner, slug);
+
+      const res = await request(semLista.app)
+        .get('/api/health')
+        .set('Origin', `https://${slug}.plataforma.local`);
+      expect(res.status).toBe(200);
+    });
+
+    it('com lista vazia, requisicao sem Origin continua passando', async () => {
+      const res = await request(semLista.app).get('/api/health');
+      expect(res.status).toBe(200);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // RN12 · elevacao de papel DURANTE a sessao
+  //
+  // Regressao do contorno encontrado na validacao: a sessao de quem nao exigia
+  // MFA nascia com `mfa_satisfied_at` preenchido, e a trava
+  // `mfaRequired && !mfaSatisfied` nunca disparava depois de uma promocao.
+  // -------------------------------------------------------------------------
+  describe('RN12 · promocao de papel durante a sessao', () => {
+    it('SUPPORT promovido a OWNER perde acesso ate comprovar MFA', async () => {
+      const slug = unique('promo-');
+      const tenantId = await seedTenantWithSlug(harness.owner, slug);
+      const account = await seedAccount(harness.owner);
+      await grantMembership(harness.owner, { tenantId, userId: account.userId, role: 'SUPPORT' });
+
+      const { cookie, status } = await loginAs(harness, account);
+      expect(status).toBe('authenticated');
+
+      // Antes da promocao, SUPPORT usa normalmente o que lhe cabe.
+      const antes = await request(harness.app)
+        .get('/api/tenant/context')
+        .set('Cookie', cookie)
+        .set('x-tenant-slug', slug);
+      expect(antes.status).toBe(200);
+
+      await grantMembership(harness.owner, { tenantId, userId: account.userId, role: 'OWNER' });
+
+      // A promocao vale na requisicao SEGUINTE. Sem logout, sem espera.
+      const depois = await request(harness.app)
+        .get('/api/tenant/context')
+        .set('Cookie', cookie)
+        .set('x-tenant-slug', slug);
+      expect(depois.status).toBe(403);
+      expect(['MFA_REQUIRED', 'MFA_ENROLLMENT_REQUIRED']).toContain(depois.body.error.code);
+
+      // E a rota privilegiada tambem, que era o caminho explorado.
+      const auditoria = await request(harness.app)
+        .get('/api/tenant/audit-events')
+        .set('Cookie', cookie)
+        .set('x-tenant-slug', slug);
+      expect(auditoria.status).toBe(403);
+    });
+
+    it('depois de comprovar MFA de verdade, o OWNER promovido passa', async () => {
+      const slug = unique('promo-ok-');
+      const tenantId = await seedTenantWithSlug(harness.owner, slug);
+      const account = await seedAccount(harness.owner);
+      await grantMembership(harness.owner, { tenantId, userId: account.userId, role: 'SUPPORT' });
+
+      const { cookie } = await loginAs(harness, account);
+      await grantMembership(harness.owner, { tenantId, userId: account.userId, role: 'OWNER' });
+
+      // Cadastra o fator e confirma — o unico caminho aberto a quem esta preso
+      // na trava de RN12.
+      const start = await request(harness.app).post('/api/auth/mfa/enroll').set('Cookie', cookie);
+      expect(start.status).toBe(200);
+      const confirmed = await confirmMfaEnrollment(
+        harness,
+        cookie,
+        await currentCode(start.body.secret),
+      );
+      expect(confirmed.status).toBe(200);
+
+      const liberado = await request(harness.app)
+        .get('/api/tenant/audit-events')
+        .set('Cookie', confirmed.cookie)
+        .set('x-tenant-slug', slug);
+      expect(liberado.status).toBe(200);
+    });
+
+    it('usuario comum que recebe Super Admin nao lista comunidades sem MFA', async () => {
+      // O caso mais grave: a rota atravessa a fronteira da plataforma inteira.
+      const account = await seedAccount(harness.owner);
+      const { cookie } = await loginAs(harness, account);
+
+      await grantPlatformRole(harness.owner, {
+        userId: account.userId,
+        role: 'PLATFORM_OPERATIONS',
+      });
+
+      const res = await request(harness.app).get('/api/platform/tenants').set('Cookie', cookie);
+      expect(res.status).toBe(403);
+      expect(['MFA_REQUIRED', 'MFA_ENROLLMENT_REQUIRED']).toContain(res.body.error.code);
+      expect(res.body.tenants).toBeUndefined();
+    });
+
+    it('depois de comprovar MFA, o Super Admin recem-concedido passa', async () => {
+      const account = await seedAccount(harness.owner);
+      const { cookie } = await loginAs(harness, account);
+      await grantPlatformRole(harness.owner, {
+        userId: account.userId,
+        role: 'PLATFORM_OPERATIONS',
+      });
+
+      const start = await request(harness.app).post('/api/auth/mfa/enroll').set('Cookie', cookie);
+      const confirmed = await confirmMfaEnrollment(
+        harness,
+        cookie,
+        await currentCode(start.body.secret),
+      );
+      expect(confirmed.status).toBe(200);
+
+      const res = await request(harness.app)
+        .get('/api/platform/tenants')
+        .set('Cookie', confirmed.cookie);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.tenants)).toBe(true);
+    });
+
+    it('a sessao NASCE sem fator comprovado, mesmo para quem nao exige MFA', async () => {
+      // `mfa_satisfied_at` significa "esta sessao apresentou um segundo fator".
+      // Preenche-la no login por "nao precisava" foi a origem do contorno.
+      const account = await seedAccount(harness.owner);
+      const { cookie } = await loginAs(harness, account);
+
+      const { rows } = await harness.owner.query<{ mfa_satisfied_at: string | null }>(
+        'SELECT mfa_satisfied_at FROM sessions WHERE user_id = $1',
+        [account.userId],
+      );
+      expect(rows[0]?.mfa_satisfied_at).toBeNull();
+
+      const session = await request(harness.app).get('/api/auth/session').set('Cookie', cookie);
+      expect(session.body.mfaSatisfied).toBe(false);
+      expect(session.body.mfaRequired).toBe(false);
+    });
+
+    it('quem nao esta sob RN12 continua usando as rotas que lhe cabem', async () => {
+      // A correcao nao pode transformar "nao precisa de MFA" em "bloqueado".
+      for (const role of ['MARKETING', 'SUPPORT', 'OPERATOR']) {
+        const slug = unique('semrn12-');
+        const tenantId = await seedTenantWithSlug(harness.owner, slug);
+        const account = await seedAccount(harness.owner);
+        await grantMembership(harness.owner, { tenantId, userId: account.userId, role });
+
+        const { cookie, status } = await loginAs(harness, account);
+        expect(status, `${role} nao deveria ter pendencia de MFA`).toBe('authenticated');
+
+        const contexto = await request(harness.app)
+          .get('/api/tenant/context')
+          .set('Cookie', cookie)
+          .set('x-tenant-slug', slug);
+        expect(contexto.status, `${role} deveria acessar o painel`).toBe(200);
+
+        const sessao = await request(harness.app).get('/api/auth/session').set('Cookie', cookie);
+        expect(sessao.status).toBe(200);
+      }
+    });
+
+    it('revogar o papel que exigia MFA devolve o acesso comum', async () => {
+      const slug = unique('desce-');
+      const tenantId = await seedTenantWithSlug(harness.owner, slug);
+      const account = await seedAccount(harness.owner);
+      await grantMembership(harness.owner, { tenantId, userId: account.userId, role: 'SUPPORT' });
+      await grantMembership(harness.owner, { tenantId, userId: account.userId, role: 'OWNER' });
+
+      const { cookie } = await loginAs(harness, account);
+      const preso = await request(harness.app)
+        .get('/api/tenant/context')
+        .set('Cookie', cookie)
+        .set('x-tenant-slug', slug);
+      expect(preso.status).toBe(403);
+
+      await harness.owner.query(
+        `UPDATE memberships SET revoked_at = now()
+          WHERE tenant_id = $1 AND user_id = $2 AND role = 'OWNER'`,
+        [tenantId, account.userId],
+      );
+
+      const livre = await request(harness.app)
+        .get('/api/tenant/context')
+        .set('Cookie', cookie)
+        .set('x-tenant-slug', slug);
+      expect(livre.status).toBe(200);
+      expect(livre.body.roles).toEqual(['SUPPORT']);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // RN12 · rotacao do token na elevacao da sessao
+  // -------------------------------------------------------------------------
+  describe('RN12 · rotacao do token apos o segundo fator', () => {
+    it('o token anterior a verificacao deixa de valer', async () => {
+      const slug = unique('rot-');
+      const tenantId = await seedTenantWithSlug(harness.owner, slug);
+      const account = await seedAccount(harness.owner);
+      await grantMembership(harness.owner, { tenantId, userId: account.userId, role: 'OWNER' });
+      const secret = await seedConfirmedTotp(harness.owner, account.userId);
+
+      const login = await loginAs(harness, account);
+      const verified = await verifyMfa(harness, login.cookie, await currentCode(secret));
+      expect(verified.status).toBe(200);
+      expect(verified.cookie).not.toBe(login.cookie);
+
+      // Quem capturou o token ANTES da elevacao nao herda o privilegio.
+      const antigo = await request(harness.app)
+        .get('/api/tenant/audit-events')
+        .set('Cookie', login.cookie)
+        .set('x-tenant-slug', slug);
+      expect(antigo.status).toBe(401);
+
+      const novo = await request(harness.app)
+        .get('/api/tenant/audit-events')
+        .set('Cookie', verified.cookie)
+        .set('x-tenant-slug', slug);
+      expect(novo.status).toBe(200);
+    });
+
+    it('o token anterior ao CADASTRO do fator tambem deixa de valer', async () => {
+      const slug = unique('rot2-');
+      const tenantId = await seedTenantWithSlug(harness.owner, slug);
+      const account = await seedAccount(harness.owner);
+      await grantMembership(harness.owner, { tenantId, userId: account.userId, role: 'OWNER' });
+
+      const { cookie } = await loginAs(harness, account);
+      const start = await request(harness.app).post('/api/auth/mfa/enroll').set('Cookie', cookie);
+      const confirmed = await confirmMfaEnrollment(
+        harness,
+        cookie,
+        await currentCode(start.body.secret),
+      );
+      expect(confirmed.status).toBe(200);
+      expect(confirmed.cookie).not.toBe(cookie);
+
+      const antigo = await request(harness.app).get('/api/auth/session').set('Cookie', cookie);
+      expect(antigo.status).toBe(401);
+    });
+
+    it('a rotacao preserva a MESMA sessao, nao abre outra', async () => {
+      // O identificador da sessao liga a trilha de auditoria ao mesmo episodio
+      // de acesso; o que roda e o segredo portador, nao o episodio.
+      const account = await seedAccount(harness.owner);
+      await grantPlatformRole(harness.owner, {
+        userId: account.userId,
+        role: 'PLATFORM_OPERATIONS',
+      });
+      const secret = await seedConfirmedTotp(harness.owner, account.userId);
+
+      const login = await loginAs(harness, account);
+      await verifyMfa(harness, login.cookie, await currentCode(secret));
+
+      const { rows } = await harness.owner.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM sessions WHERE user_id = $1 AND revoked_at IS NULL',
+        [account.userId],
+      );
+      expect(rows[0]?.count).toBe('1');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // RN12 · o CADASTRO tem as mesmas defesas da verificacao
+  // -------------------------------------------------------------------------
+  describe('RN12 · defesas do cadastro do segundo fator', () => {
+    async function ownerEmEnrollment() {
+      const slug = unique('enr-');
+      const tenantId = await seedTenantWithSlug(harness.owner, slug);
+      const account = await seedAccount(harness.owner);
+      await grantMembership(harness.owner, { tenantId, userId: account.userId, role: 'OWNER' });
+      const { cookie } = await loginAs(harness, account);
+      const start = await request(harness.app).post('/api/auth/mfa/enroll').set('Cookie', cookie);
+      return { account, cookie, slug, secret: start.body.secret as string };
+    }
+
+    it('codigos errados no cadastro bloqueiam por tentativas', async () => {
+      // O cadastro termina em sessao ELEVADA: sem limite aqui, o atacante com a
+      // senha simplesmente escolheria este endpoint em vez do de verificacao.
+      const { account, cookie } = await ownerEmEnrollment();
+
+      for (let i = 0; i < harness.config.LOGIN_MAX_ATTEMPTS; i += 1) {
+        const res = await confirmMfaEnrollment(harness, cookie, '000000');
+        expect(res.status).toBe(401);
+      }
+
+      const blocked = await confirmMfaEnrollment(harness, cookie, '000000');
+      expect(blocked.status).toBe(429);
+
+      const { rows } = await harness.owner.query<{ mfa_failed_attempts: number }>(
+        'SELECT mfa_failed_attempts FROM user_credentials WHERE user_id = $1',
+        [account.userId],
+      );
+      expect(rows[0]!.mfa_failed_attempts).toBeGreaterThanOrEqual(
+        harness.config.LOGIN_MAX_ATTEMPTS,
+      );
+    });
+
+    it('o bloqueio do cadastro e o MESMO do de verificacao', async () => {
+      // Dois contadores independentes dariam ao atacante o dobro de tentativas:
+      // gastaria o limite num endpoint e recomecaria do zero no outro.
+      const { cookie, secret } = await ownerEmEnrollment();
+      for (let i = 0; i < harness.config.LOGIN_MAX_ATTEMPTS; i += 1) {
+        await confirmMfaEnrollment(harness, cookie, '000000');
+      }
+
+      const verify = await verifyMfa(harness, cookie, await currentCode(secret));
+      expect(verify.status).toBe(429);
+    });
+
+    it('acertar o cadastro zera o contador de tentativas', async () => {
+      const { account, cookie, secret } = await ownerEmEnrollment();
+      await confirmMfaEnrollment(harness, cookie, '000000');
+
+      const ok = await confirmMfaEnrollment(harness, cookie, await currentCode(secret));
+      expect(ok.status).toBe(200);
+
+      const { rows } = await harness.owner.query<{
+        mfa_failed_attempts: number;
+        mfa_locked_until: string | null;
+      }>(
+        'SELECT mfa_failed_attempts, mfa_locked_until FROM user_credentials WHERE user_id = $1',
+        [account.userId],
+      );
+      expect(rows[0]?.mfa_failed_attempts).toBe(0);
+      expect(rows[0]?.mfa_locked_until).toBeNull();
+    });
+
+    it('o codigo usado no cadastro nao vale de novo na verificacao (replay)', async () => {
+      // O passo aceito na confirmacao fica gravado em `last_used_step`, entao o
+      // mesmo codigo de 6 digitos nao serve para elevar outra sessao dentro da
+      // mesma janela de 30 s.
+      const { account, cookie, secret } = await ownerEmEnrollment();
+      const code = await currentCode(secret);
+
+      const confirmed = await confirmMfaEnrollment(harness, cookie, code);
+      expect(confirmed.status).toBe(200);
+
+      const outra = await loginAs(harness, account);
+      const replay = await verifyMfa(harness, outra.cookie, code);
+      expect(replay.status).toBe(401);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // RN11 · trilha de identidade
+  // -------------------------------------------------------------------------
+  describe('RN11 · trilha de auditoria da identidade', () => {
+    it('login bem-sucedido, logout e logout-all sao registrados', async () => {
+      const account = await seedAccount(harness.owner);
+      const { cookie } = await loginAs(harness, account);
+      await request(harness.app).post('/api/auth/logout').set('Cookie', cookie);
+
+      const segunda = await loginAs(harness, account);
+      await request(harness.app).post('/api/auth/logout-all').set('Cookie', segunda.cookie);
+
+      const actions = await identityAuditActions(harness.owner, account.userId);
+      expect(actions).toContain('auth.login.succeeded');
+      expect(actions).toContain('auth.logout');
+      expect(actions).toContain('auth.logout_all');
+    });
+
+    it('tentativa recusada e bloqueio de conta sao registrados', async () => {
+      const account = await seedAccount(harness.owner);
+      for (let i = 0; i < harness.config.LOGIN_MAX_ATTEMPTS; i += 1) {
+        await request(harness.app)
+          .post('/api/auth/login')
+          .send({ email: account.email, password: 'errada' });
+      }
+
+      const actions = await identityAuditActions(harness.owner, account.userId);
+      expect(actions).toContain('auth.login.failed');
+      expect(actions).toContain('auth.account_locked');
+      // O bloqueio e registrado UMA vez, na transicao — nao a cada insistencia.
+      expect(actions.filter((a) => a === 'auth.account_locked')).toHaveLength(1);
+    });
+
+    it('cadastro do segundo fator deixa trilha de inicio e de confirmacao', async () => {
+      const account = await seedAccount(harness.owner);
+      const { cookie } = await loginAs(harness, account);
+
+      const start = await request(harness.app).post('/api/auth/mfa/enroll').set('Cookie', cookie);
+      const confirmed = await confirmMfaEnrollment(
+        harness,
+        cookie,
+        await currentCode(start.body.secret),
+      );
+      expect(confirmed.status).toBe(200);
+
+      const actions = await identityAuditActions(harness.owner, account.userId);
+      expect(actions).toContain('auth.mfa.enrollment_started');
+      expect(actions).toContain('auth.mfa.enrollment_confirmed');
+    });
+
+    it('verificacao do segundo fator deixa trilha', async () => {
+      // Conta com fator JA confirmado: evita depender do passo TOTP consumido
+      // por um cadastro feito no mesmo instante.
+      const account = await seedAccount(harness.owner);
+      const secret = await seedConfirmedTotp(harness.owner, account.userId);
+
+      const login = await loginAs(harness, account);
+      const verified = await verifyMfa(harness, login.cookie, await currentCode(secret));
+      expect(verified.status).toBe(200);
+
+      const actions = await identityAuditActions(harness.owner, account.userId);
+      expect(actions).toContain('auth.mfa.verified');
+    });
+
+    it('a trilha de identidade NAO carrega segredo algum', async () => {
+      const account = await seedAccount(harness.owner);
+      const { cookie } = await loginAs(harness, account);
+      const start = await request(harness.app).post('/api/auth/mfa/enroll').set('Cookie', cookie);
+      await confirmMfaEnrollment(harness, cookie, await currentCode(start.body.secret));
+
+      const { rows } = await harness.owner.query<{ after: unknown }>(
+        `SELECT after FROM audit_events
+          WHERE actor_user_id = $1 AND action LIKE 'auth.%'`,
+        [account.userId],
+      );
+      const dump = JSON.stringify(rows);
+      expect(dump).not.toContain(start.body.secret);
+      expect(dump).not.toMatch(/senha|password|token|secret/i);
+    });
+
+    it('a trilha de identidade nao aparece na trilha da COMUNIDADE', async () => {
+      // Evento de identidade tem tenant_id nulo; a listagem da comunidade so
+      // enxerga o proprio tenant. Um vazamento aqui exporia o IP de quem loga.
+      const slug = unique('trilha-');
+      const tenantId = await seedTenantWithSlug(harness.owner, slug);
+      const account = await seedAccount(harness.owner);
+      await grantMembership(harness.owner, { tenantId, userId: account.userId, role: 'OWNER' });
+
+      const { cookie } = await loginAs(harness, account);
+      const start = await request(harness.app).post('/api/auth/mfa/enroll').set('Cookie', cookie);
+      const confirmed = await confirmMfaEnrollment(
+        harness,
+        cookie,
+        await currentCode(start.body.secret),
+      );
+
+      const res = await request(harness.app)
+        .get('/api/tenant/audit-events')
+        .set('Cookie', confirmed.cookie)
+        .set('x-tenant-slug', slug);
+      expect(res.status).toBe(200);
+      for (const evento of res.body.events as { action: string }[]) {
+        expect(evento.action.startsWith('auth.')).toBe(false);
+      }
+    });
+
+    it('a trilha de identidade e imutavel como o resto (RN11)', async () => {
+      const account = await seedAccount(harness.owner);
+      await loginAs(harness, account);
+
+      const { rows } = await harness.owner.query<{ id: string }>(
+        `SELECT id FROM audit_events WHERE actor_user_id = $1 AND action = 'auth.login.succeeded'`,
+        [account.userId],
+      );
+      expect(rows.length).toBeGreaterThan(0);
+
+      await expect(
+        harness.owner.query('UPDATE audit_events SET action = $2 WHERE id = $1', [
+          rows[0]!.id,
+          'auth.adulterado',
+        ]),
+      ).rejects.toThrow();
     });
   });
 

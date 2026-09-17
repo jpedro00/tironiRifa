@@ -24,12 +24,28 @@ export interface AuditInput {
   readonly userAgent?: string | null;
 }
 
-export async function recordAuditEvent(client: PoolClient, input: AuditInput): Promise<string> {
-  const { rows } = await client.query<{ id: string }>(
+/**
+ * Grava um evento na trilha.
+ *
+ * SEM `RETURNING`, de proposito. `INSERT ... RETURNING` faz a linha recem
+ * inserida passar tambem pela policy de SELECT — nao apenas pela de INSERT. Numa
+ * tabela somente-insercao isso acopla escrita a leitura pelo pior motivo: obriga
+ * a abrir leitura sobre um registro so para confirmar que ele foi escrito.
+ *
+ * Foi exatamente o que manteve `audit_identity_insert` (0007) inoperante. A
+ * policy de insercao autorizava o evento de identidade, mas a de leitura
+ * (`audit_events_select`) so enxerga o que pertence a uma comunidade; a linha
+ * era aceita na escrita e recusada no `RETURNING`, e o PostgreSQL relata os dois
+ * casos com a MESMA mensagem ("new row violates row-level security policy"),
+ * o que faz o erro parecer recusa de escrita.
+ *
+ * Nenhum chamador usa o identificador devolvido. Ele existia por habito.
+ */
+export async function recordAuditEvent(client: PoolClient, input: AuditInput): Promise<void> {
+  await client.query(
     `INSERT INTO audit_events
        (tenant_id, actor_user_id, actor_type, action, target_type, target_id, before, after, ip, user_agent)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::inet, $10)
-     RETURNING id`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::inet, $10)`,
     [
       input.tenantId,
       input.actorUserId,
@@ -43,7 +59,6 @@ export async function recordAuditEvent(client: PoolClient, input: AuditInput): P
       input.userAgent ?? null,
     ],
   );
-  return rows[0]!.id;
 }
 
 export interface AuditEventRow {

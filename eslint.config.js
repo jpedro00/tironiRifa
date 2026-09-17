@@ -41,6 +41,8 @@ export default tseslint.config(
       'apps/api/**/*.ts',
       'apps/worker/**/*.ts',
       'packages/**/*.ts',
+      // Scripts de apoio ao CI, em JavaScript puro.
+      'scripts/**/*.{js,mjs}',
       '**/*.config.ts',
       '**/*.config.js',
       '**/tests/**/*.ts',

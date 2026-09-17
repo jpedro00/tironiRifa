@@ -11,6 +11,7 @@ import {
 import { createApp } from '../src/app.js';
 import { listRegisteredRoutes } from '../src/http/registerRoutes.js';
 import { loadConfig } from '../src/config.js';
+import { LoginThrottle } from '../src/lib/loginThrottle.js';
 import { SecretBox } from '../src/lib/secretBox.js';
 import { createPool } from '@campaigns/db';
 
@@ -32,7 +33,16 @@ function buildTestApp() {
     APP_BASE_DOMAIN: 'plataforma.local',
   });
   const pool = createPool({ connectionString: config.DATABASE_URL, max: 1 });
-  const app = createApp({ config, pool, secretBox: new SecretBox(config.MFA_ENCRYPTION_KEY) });
+  const app = createApp({
+    config,
+    pool,
+    secretBox: new SecretBox(config.MFA_ENCRYPTION_KEY),
+    loginThrottle: new LoginThrottle({
+      windowMs: config.LOGIN_ORIGIN_WINDOW_MINUTES * 60_000,
+      maxFailures: config.LOGIN_ORIGIN_MAX_FAILURES,
+      maxDistinctAccounts: config.LOGIN_ORIGIN_MAX_ACCOUNTS,
+    }),
+  });
   return { app, pool };
 }
 

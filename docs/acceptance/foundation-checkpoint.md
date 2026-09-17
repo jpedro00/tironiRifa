@@ -1,5 +1,10 @@
 # Fase 1 — checkpoint de execução
 
+> **17/09/2026 — rodada de correção e validação total.** Os bloqueios descritos
+> abaixo foram resolvidos. O estado atual está em
+> [`rodada-correcao-final.md`](rodada-correcao-final.md); este arquivo é
+> mantido como histórico do diagnóstico que levou às correções.
+
 16/09/2026. Fundação parcial; não aceita para início da Fase 2.
 
 Fontes funcionais: DOC-01, D01 e prompts geral/Astra.

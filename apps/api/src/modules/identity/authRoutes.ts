@@ -29,21 +29,35 @@ function asyncHandler(
   };
 }
 
+/**
+ * `sameSite` vem da configuracao, e nao fixo no codigo, porque a resposta certa
+ * depende da TOPOLOGIA da instalacao: `lax` quando a vitrine e a API
+ * compartilham o site, `none` quando estao em sites diferentes (Vercel +
+ * Render), caso em que `lax` faria o navegador simplesmente nao enviar o
+ * cookie. Quem barra escrita de origem desconhecida e o `originGuard`, que
+ * recusa com 403 antes do handler e nao depende de `SameSite`. Ver o comentario
+ * de `SESSION_COOKIE_SAMESITE` em config.ts.
+ */
 function setSessionCookie(deps: AppDeps, res: Response, token: string): void {
   res.cookie(deps.config.SESSION_COOKIE_NAME, token, {
     httpOnly: true, // JavaScript da pagina nao le o token.
     secure: deps.config.SESSION_COOKIE_SECURE,
-    sameSite: 'lax', // navegacao normal funciona; POST de outro site, nao.
+    sameSite: deps.config.SESSION_COOKIE_SAMESITE,
     path: '/',
     maxAge: deps.config.SESSION_TTL_HOURS * 3600 * 1000,
   });
 }
 
+/**
+ * Apagar o cookie exige os MESMOS atributos com que ele foi posto. Divergir em
+ * `sameSite`, `secure` ou `path` faz o navegador tratar como outro cookie, e o
+ * antigo sobrevive ao logout.
+ */
 function clearSessionCookie(deps: AppDeps, res: Response): void {
   res.clearCookie(deps.config.SESSION_COOKIE_NAME, {
     httpOnly: true,
     secure: deps.config.SESSION_COOKIE_SECURE,
-    sameSite: 'lax',
+    sameSite: deps.config.SESSION_COOKIE_SAMESITE,
     path: '/',
   });
 }
@@ -52,6 +66,11 @@ function requireSession(req: Request) {
   const session = req.session;
   if (!session) throw ApiError.unauthenticated();
   return session;
+}
+
+/** Origem da requisicao, propagada ate a trilha de auditoria (RN11). */
+function originOf(req: Request): { ip: string | null; userAgent: string | null } {
+  return { ip: req.context?.ip ?? null, userAgent: req.context?.userAgent ?? null };
 }
 
 export function buildAuthHandlers(deps: AppDeps): Record<string, RequestHandler> {
@@ -85,6 +104,7 @@ export function buildAuthHandlers(deps: AppDeps): Record<string, RequestHandler>
         userId: session.userId,
         sessionId: session.sessionId,
         reason: 'logout',
+        origin: originOf(req),
       });
       clearSessionCookie(deps, res);
       res.status(204).end();
@@ -95,6 +115,7 @@ export function buildAuthHandlers(deps: AppDeps): Record<string, RequestHandler>
       const revoked = await revokeAllSessions(deps, {
         userId: session.userId,
         reason: 'logout_all',
+        origin: originOf(req),
       });
       clearSessionCookie(deps, res);
       res.status(200).json({ revoked });
@@ -154,30 +175,40 @@ export function buildAuthHandlers(deps: AppDeps): Record<string, RequestHandler>
       const enrollment = await startMfaEnrollment(deps, {
         userId: session.userId,
         email: session.email,
+        origin: originOf(req),
       });
       // O segredo aparece UMA vez, na tela de cadastro. Nao volta a ser lido.
       res.status(200).json(enrollment);
     }),
 
+    /**
+     * Confirmar o cadastro ELEVA a sessao. Por isso a resposta traz um cookie
+     * novo: o token entregue antes da elevacao deixa de valer no mesmo
+     * instante. Ver `rotateSessionToken` em authService.ts.
+     */
     mfaEnrollConfirm: asyncHandler(async (req, res) => {
       const session = requireSession(req);
       const body = mfaCodeRequestSchema.parse(req.body);
-      await confirmMfaEnrollment(deps, {
+      const elevated = await confirmMfaEnrollment(deps, {
         userId: session.userId,
         sessionId: session.sessionId,
         code: body.code,
+        origin: originOf(req),
       });
+      setSessionCookie(deps, res, elevated.token);
       res.status(200).json({ status: 'authenticated' });
     }),
 
     mfaVerify: asyncHandler(async (req, res) => {
       const session = requireSession(req);
       const body = mfaCodeRequestSchema.parse(req.body);
-      await verifyMfaForSession(deps, {
+      const elevated = await verifyMfaForSession(deps, {
         userId: session.userId,
         sessionId: session.sessionId,
         code: body.code,
+        origin: originOf(req),
       });
+      setSessionCookie(deps, res, elevated.token);
       res.status(200).json({ status: 'authenticated' });
     }),
   };

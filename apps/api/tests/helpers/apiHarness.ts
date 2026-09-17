@@ -4,6 +4,7 @@ import pg from 'pg';
 import { createPool, migrate, type DbPool } from '@campaigns/db';
 import { createApp } from '../../src/app.js';
 import { loadConfig, type AppConfig } from '../../src/config.js';
+import { LoginThrottle } from '../../src/lib/loginThrottle.js';
 import { SecretBox } from '../../src/lib/secretBox.js';
 import { hashPassword } from '../../src/lib/password.js';
 
@@ -28,11 +29,26 @@ export const skipReason =
 export const TEST_BASE_DOMAIN = 'plataforma.local';
 export const TEST_MFA_KEY = Buffer.alloc(32, 3).toString('base64');
 
+/**
+ * Allowlist de origens da bancada.
+ *
+ * Precisa ser declarada: `loadConfig` recebe um ambiente EXPLICITO, e sem esta
+ * chave `config.corsOrigins` nasce vazio — o ramo positivo do `originGuard`
+ * (painel interno numa origem declarada) ficaria sem cobertura, e o teste que o
+ * exercita falharia por construcao, em qualquer maquina e no CI.
+ *
+ * Sao dominios `.test` (RFC 2606): nao resolvem, nao existem e nao podem ser
+ * registrados por ninguem.
+ */
+export const TEST_CORS_ORIGINS = ['https://organizer.test', 'https://admin.test'] as const;
+
 export interface Harness {
   readonly app: Express;
   readonly pool: DbPool;
   readonly owner: DbPool;
   readonly config: AppConfig;
+  /** Exposto para que o teste do limite inspecione e zere o estado. */
+  readonly loginThrottle: LoginThrottle;
   close(): Promise<void>;
 }
 
@@ -47,6 +63,29 @@ export interface HarnessOptions {
    * comunidade sai exclusivamente do dominio.
    */
   readonly tenantHeaderEnabled?: boolean;
+  /**
+   * Allowlist de origens. PADRAO `TEST_CORS_ORIGINS`.
+   *
+   * Passe `[]` para exercitar o comportamento de uma instalacao que nao
+   * declarou nenhum painel interno — o guard continua estrito, e o unico
+   * caminho de origem valida passa a ser o dominio de comunidade verificado.
+   */
+  readonly corsOrigins?: readonly string[];
+  /**
+   * Limite por origem.
+   *
+   * PADRAO praticamente ilimitado, de proposito: as outras suites disparam
+   * dezenas de tentativas falhas para exercitar o bloqueio POR CONTA, e um
+   * limite por origem realista as cortaria pela metade — o teste passaria a
+   * medir o limitador em vez do que ele quer medir.
+   *
+   * A suite do proprio limite passa valores pequenos e explicitos.
+   */
+  readonly originLimits?: {
+    readonly windowMinutes?: number;
+    readonly maxFailures?: number;
+    readonly maxAccounts?: number;
+  };
 }
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -61,9 +100,13 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
     MFA_ENCRYPTION_KEY: TEST_MFA_KEY,
     APP_BASE_DOMAIN: TEST_BASE_DOMAIN,
     TENANT_HEADER_ENABLED: (options.tenantHeaderEnabled ?? true) ? 'true' : 'false',
+    CORS_ORIGINS: (options.corsOrigins ?? TEST_CORS_ORIGINS).join(','),
     SESSION_COOKIE_SECURE: 'false',
     LOGIN_MAX_ATTEMPTS: '5',
     LOGIN_LOCK_MINUTES: '15',
+    LOGIN_ORIGIN_WINDOW_MINUTES: String(options.originLimits?.windowMinutes ?? 15),
+    LOGIN_ORIGIN_MAX_FAILURES: String(options.originLimits?.maxFailures ?? 1_000_000),
+    LOGIN_ORIGIN_MAX_ACCOUNTS: String(options.originLimits?.maxAccounts ?? 1_000_000),
   });
 
   const pool = createPool({ connectionString: TEST_APP_URL, applicationName: 'test-api', max: 5 });
@@ -73,13 +116,20 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
     max: 5,
   });
 
-  const app = createApp({ config, pool, secretBox: new SecretBox(TEST_MFA_KEY) });
+  const loginThrottle = new LoginThrottle({
+    windowMs: config.LOGIN_ORIGIN_WINDOW_MINUTES * 60_000,
+    maxFailures: config.LOGIN_ORIGIN_MAX_FAILURES,
+    maxDistinctAccounts: config.LOGIN_ORIGIN_MAX_ACCOUNTS,
+  });
+
+  const app = createApp({ config, pool, secretBox: new SecretBox(TEST_MFA_KEY), loginThrottle });
 
   return {
     app,
     pool,
     owner,
     config,
+    loginThrottle,
     async close() {
       await pool.end();
       await owner.end();
@@ -202,6 +252,62 @@ export async function loginAs(
     cookie: sessionCookieFrom(res, harness.config.SESSION_COOKIE_NAME),
     status: res.body.status as string,
   };
+}
+
+/**
+ * Satisfaz o segundo fator e devolve o cookie ROTACIONADO.
+ *
+ * A elevacao troca o segredo portador da sessao (ver `rotateSessionToken`), de
+ * modo que o cookie usado para chamar `/mfa/verify` morre nessa mesma chamada.
+ * Reaproveitar o cookie antigo depois daqui e justamente o que o teste de
+ * rotacao prova que nao funciona.
+ */
+export async function verifyMfa(
+  harness: Harness,
+  cookie: string,
+  code: string,
+): Promise<{ status: number; cookie: string; body: unknown }> {
+  const res = await request(harness.app)
+    .post('/api/auth/mfa/verify')
+    .set('Cookie', cookie)
+    .send({ code });
+
+  return {
+    status: res.status,
+    body: res.body,
+    cookie:
+      res.status === 200 ? sessionCookieFrom(res, harness.config.SESSION_COOKIE_NAME) : cookie,
+  };
+}
+
+/** Confirma o cadastro do segundo fator e devolve o cookie ROTACIONADO. */
+export async function confirmMfaEnrollment(
+  harness: Harness,
+  cookie: string,
+  code: string,
+): Promise<{ status: number; cookie: string; body: unknown }> {
+  const res = await request(harness.app)
+    .post('/api/auth/mfa/enroll/confirm')
+    .set('Cookie', cookie)
+    .send({ code });
+
+  return {
+    status: res.status,
+    body: res.body,
+    cookie:
+      res.status === 200 ? sessionCookieFrom(res, harness.config.SESSION_COOKIE_NAME) : cookie,
+  };
+}
+
+/** Eventos `auth.*` de um usuario, lidos pela conexao de dono (RN11). */
+export async function identityAuditActions(owner: DbPool, userId: string): Promise<string[]> {
+  const { rows } = await owner.query<{ action: string }>(
+    `SELECT action FROM audit_events
+      WHERE actor_user_id = $1 AND tenant_id IS NULL AND action LIKE 'auth.%'
+      ORDER BY occurred_at, action`,
+    [userId],
+  );
+  return rows.map((row) => row.action);
 }
 
 /** Limpa dados entre suites, respeitando a imutabilidade da trilha (RN11). */

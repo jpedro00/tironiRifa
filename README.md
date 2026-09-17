@@ -18,6 +18,7 @@ usar: isolamento por comunidade, identidade, permissões, auditoria e outbox.
 - [Rodar](#rodar)
 - [Testes](#testes)
 - [Rotas](#rotas)
+- [Trilha de auditoria (RN11)](#trilha-de-auditoria-rn11)
 - [Documentos](#documentos)
 
 ---
@@ -27,7 +28,7 @@ usar: isolamento por comunidade, identidade, permissões, auditoria e outbox.
 ```
 apps/
   api/          API HTTP (Express). Conecta com o papel restrito app_user.
-  worker/       Relay da outbox + consumidores (pg-boss).
+  worker/       Relay da outbox + consumidores (pg-boss). Entrada: src/worker.ts.
   storefront/   Vitrine do participante (React + Vite).
   organizer/    Painel do organizador (React + Vite).
   admin/        Console Super Admin (React + Vite).
@@ -56,9 +57,11 @@ vazia sugere trabalho que não existe.
 | MFA obrigatório para dono, financeiro e Super Admin (RN12) | ✅ |
 | Matriz de permissões do DOC-01 §3, aplicada no backend | ✅ |
 | Resolução de comunidade por domínio ou slug | ✅ |
-| Auditoria somente-inserção (RN11) | ✅ |
+| Auditoria somente-inserção (RN11), inclusive da identidade | ✅ |
 | Outbox transacional + relay + consumidor idempotente (RN21) | ✅ |
 | Três frontends React com sessão, contexto e controle de acesso | ✅ |
+| Fila real (pg-boss) exercitada de ponta a ponta | ✅ |
+| Dead-letter da outbox: evento esgotado sai do fluxo | ✅ |
 | Constantes protegidas com teste que falha se mudarem | ✅ |
 | CI com lint, typecheck, testes e build | ✅ |
 
@@ -114,7 +117,21 @@ npm run build -w @campaigns/db
 ```bash
 npm run db:bootstrap   # cria o banco e os papéis restritos app_user e app_worker
 npm run db:migrate     # aplica as migrations
+npm run queue:install -w @campaigns/worker   # cria o schema da fila (pg-boss)
 ```
+
+**Por que a fila tem um passo próprio.** O pg-boss cria o próprio schema ao
+subir, e `CREATE SCHEMA IF NOT EXISTS` exige privilégio de criação **no banco**
+— mesmo quando o schema já existe, porque o PostgreSQL confere o privilégio
+antes de considerar o `IF NOT EXISTS`. Deixar o worker fazer isso obrigaria a
+dar esse privilégio a um processo que roda continuamente, por um comando que
+ele só precisaria uma vez na vida.
+
+O instalador roda com o papel administrativo, cria os objetos e **transfere a
+posse** para `app_worker`. Depois disso o worker administra a própria fila sem
+nenhum privilégio de DDL no banco — e continua sem poder criar schema, sem
+`BYPASSRLS` e sem acesso às tabelas de negócio além do que a `0006` concede.
+Se a fila não estiver instalada, o worker recusa subir dizendo exatamente isso.
 
 O bootstrap fica fora das migrations de propósito: criar papel exige privilégio
 administrativo e envolve **senha** — e senha não entra em arquivo versionado.
@@ -190,6 +207,31 @@ A credencial precisa existir em `user_credentials` com um hash `scrypt$…`
 gerado por `hashPassword()` (`apps/api/src/lib/password.ts`). No primeiro login
 o console exigirá o cadastro do segundo fator: **RN12 não tem escape**.
 
+### RN12 e a mudança de papel durante a sessão
+
+`sessions.mfa_satisfied_at` significa **uma única coisa**: esta sessão
+apresentou e validou um segundo fator real. Ela **não** significa "esta pessoa
+não precisava de MFA quando entrou".
+
+A distinção não é cosmética. A autorização faz duas perguntas independentes:
+
+| Pergunta | De onde vem | Quando é recalculada |
+|---|---|---|
+| O perfil **exige** MFA? | papéis vigentes no banco | **a cada requisição** |
+| Esta sessão **comprovou** MFA? | `mfa_satisfied_at` | quando o fator é apresentado |
+
+Só bloqueia quem responde *sim* à primeira e *não* à segunda. Quem não está sob
+RN12 usa normalmente as rotas que lhe cabem, com a marca nula.
+
+A consequência é o que importa: **promover alguém a dono, financeiro ou Super
+Admin passa a valer na requisição seguinte**, sem logout. A sessão aberta é
+imediatamente barrada nas rotas privilegiadas até o fator ser apresentado.
+
+Concluir o segundo fator **rotaciona o token da sessão**. A linha da sessão é a
+mesma — o identificador continua ligando a trilha ao mesmo episódio de acesso —
+mas o segredo portador é substituído. Um token capturado antes da elevação não
+se transforma em sessão privilegiada depois.
+
 ---
 
 ## Testes
@@ -240,7 +282,9 @@ falsa aprovação.
 | `packages/db/tests/audit-immutability.test.ts` | RN11: UPDATE/DELETE/TRUNCATE recusados; sem segredos na trilha | **sim** |
 | `packages/db/tests/outbox-transactional.test.ts` | RN21: rollback desfaz o evento junto | **sim** |
 | `apps/api/tests/auth-mfa-permissions.test.ts` | MFA obrigatório, matriz no backend, revogação | **sim** |
-| `apps/worker/tests/outbox-relay-and-consumer.test.ts` | Relay, recuperação, reprocessamento sem duplicar | **sim** |
+| `apps/worker/tests/outbox-relay-and-consumer.test.ts` | Relay, recuperação, reprocessamento sem duplicar, dead-letter | **sim** |
+| `apps/worker/tests/queue-end-to-end.test.ts` | outbox → relay → **pg-boss real** → consumidor → efeito; privilégios da fila | **sim** |
+| `packages/shared/tests/frontend-session-state.test.ts` | RN12 na tela, erro de rede ≠ logout, origem do slug | não |
 
 ---
 
@@ -268,6 +312,55 @@ rota inexistente quebra o typecheck, não a produção (erro E4).
 
 ---
 
+## Trilha de auditoria (RN11)
+
+A trilha é **somente inserção**: `UPDATE`, `DELETE` e `TRUNCATE` são barrados
+por trigger (0004) e pela ausência de `GRANT` (0006) — a dupla defesa cobre até
+o dono do schema.
+
+Eventos de **identidade** têm `tenant_id` nulo: login e segundo fator acontecem
+antes de existir comunidade, e podem acontecer para quem não tem comunidade
+nenhuma. Inventar um "tenant técnico" para abrigá-los criaria um balde onde
+dados de várias comunidades se encontrariam. Eles não aparecem em
+`/api/tenant/audit-events`, que enxerga apenas o próprio tenant.
+
+| Ação | Quando |
+|---|---|
+| `auth.login.succeeded` | sessão aberta — na **mesma transação** da sessão |
+| `auth.login.failed` | senha inválida ou conta não ativa ou bloqueada |
+| `auth.account_locked` | o bloqueio por tentativas passou a valer (uma vez, na transição) |
+| `auth.logout` | sessão revogada |
+| `auth.logout_all` | todas as sessões revogadas |
+| `auth.mfa.enrollment_started` | segredo TOTP gerado |
+| `auth.mfa.enrollment_confirmed` | fator confirmado e sessão elevada |
+| `auth.mfa.verified` | fator apresentado numa sessão existente |
+
+Só entram metadados seguros. Senha, segredo TOTP, token e cookie **nunca** são
+gravados — e `app.assert_no_secrets` (0001) recusa a inserção se forem, de modo
+que a disciplina do chamador não é a única linha de defesa.
+
+**Não há trilha para tentativa contra e-mail inexistente.** A tabela exige ator
+identificado, e não há a quem atribuir; registrar sob um ator de sistema
+transformaria a trilha num log de endereços sondados — dado pessoal de
+não-usuários, acumulado sem propósito. Contar esse caso é trabalho de métrica,
+não de RN11.
+
+### Login não revela se o e-mail existe
+
+Toda recusa devolve a **mesma** resposta: senha errada, e-mail inexistente,
+conta inativa e conta bloqueada por tentativas. Devolver 429 para a conta
+bloqueada parecia inofensivo, mas bastava gastar as tentativas de um endereço e
+ler o código de status para descobrir se ele existe na plataforma.
+
+O bloqueio continua existindo e continua valendo — some apenas o sinal externo.
+A senha é verificada **antes** de qualquer decisão, inclusive para conta
+bloqueada ou inativa: um retorno antecipado economizaria o `scrypt` e
+denunciaria o caso pelo tempo de resposta. E a tentativa contra uma conta já
+bloqueada **não é contabilizada**, senão qualquer um manteria uma conta
+conhecida trancada indefinidamente apenas insistindo.
+
+---
+
 ## Documentos
 
 - [`docs/decisions/fase-1-decisoes.md`](docs/decisions/fase-1-decisoes.md) —
@@ -290,3 +383,23 @@ Antes de começar, quatro decisões do produto:
 3. **Cache no `originGuard`** — hoje cada requisição com `Origin` desconhecida
    consulta o banco.
 4. **Provedores de pagamento** — PIX avulso e recorrência: a definir.
+
+### Limites conhecidos desta fase
+
+Registrados porque são reais, não porque impedem a fundação:
+
+- **Telas sem teste automatizado.** A lógica de fundação dos frontends (RN12 na
+  tela, erro de rede × logout, origem do slug) está em `@campaigns/shared` e tem
+  teste próprio. A **renderização** dos componentes não tem: cobri-la exigiria
+  trazer jsdom e uma biblioteca de teste de componente, peso que esta fase optou
+  por não adicionar.
+- **Bloqueio de conta como negação de serviço.** Tentativas repetidas trancam
+  uma conta conhecida por `LOGIN_LOCK_MINUTES`. A resposta uniforme impede
+  descobrir *quais* contas existem, mas quem já souber um e-mail válido pode
+  trancá-lo. Mitigar exige limite por origem (IP/rede) antes da autenticação —
+  camada que não existe nesta fase.
+- **Cada `Origin` desconhecida consulta o banco** (item 3 acima).
+- **Encerramento gracioso do worker não exercitado no Windows.** O processo sobe,
+  processa e libera as conexões; a entrega de `SIGTERM`/`SIGINT` a um processo
+  Node não é possível a partir do shell nesta plataforma. Verificar isso é
+  trivial no Linux e fica para a rodada de staging.
