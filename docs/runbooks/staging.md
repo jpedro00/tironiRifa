@@ -5,6 +5,23 @@ Como levantar o ambiente de staging do zero, na ordem em que precisa acontecer.
 **Staging não é produção.** É um ambiente descartável, exposto na internet, com
 TLS e sem dado real de pessoa nenhuma. Nada aqui descreve produção.
 
+> **Pré-requisito que bloqueia tudo:** Render e Vercel constroem a partir do
+> **repositório remoto**. Um commit apenas local não é visível para eles. A
+> branch precisa existir no GitHub antes de qualquer provisionamento.
+
+## Hosts
+
+| Papel | Host |
+|---|---|
+| Vitrine | `staging.<BASE_DOMAIN>` |
+| Painel do organizador | `painel.staging.<BASE_DOMAIN>` |
+| Console Super Admin | `admin.staging.<BASE_DOMAIN>` |
+| API | `api.staging.<BASE_DOMAIN>` |
+| Comunidade de teste | `demo.staging.<BASE_DOMAIN>` |
+
+Todos sob o mesmo domínio registrável — é isso que torna a topologia
+**same-site** e permite `SameSite=Lax`.
+
 ---
 
 ## Princípio que organiza tudo abaixo
@@ -144,42 +161,84 @@ painel além do Root Directory.
 Variável, em cada projeto — **a única**, e pública:
 
 ```text
-VITE_API_BASE_URL = https://campaigns-api-staging.onrender.com
+VITE_API_BASE_URL = https://api.staging.<BASE_DOMAIN>
 ```
+
+Enquanto o DNS não estiver ativo, aponte para a URL temporária do Render e
+refaça o deploy depois — o valor é embutido no pacote em tempo de build, então
+trocá-lo exige novo build.
 
 O Vite **embute** tudo que começa com `VITE_` no pacote entregue ao navegador.
 Nenhum segredo, em hipótese alguma.
 
 ---
 
-## 5. Fechar o círculo do CORS
+## 5. Domínios, CORS e cookies
 
-Com as três URLs do Vercel em mãos, preencher na API:
+### DNS
+
+| Host | Aponta para |
+|---|---|
+| `staging` | Vercel — storefront |
+| `painel.staging` | Vercel — organizer |
+| `admin.staging` | Vercel — admin |
+| `demo.staging` | Vercel — storefront (mesma aplicação) |
+| `api.staging` | Render — API |
+
+Cada provedor informa o registro exato (`CNAME`, ou `A`/`ALIAS` no ápice) ao
+adicionar o domínio no painel. Emissão de TLS costuma levar alguns minutos.
+
+### CORS
+
+Com o DNS ativo, na API:
 
 ```text
-CORS_ORIGINS = https://campaigns-storefront-staging.vercel.app,https://campaigns-organizer-staging.vercel.app,https://campaigns-admin-staging.vercel.app
+CORS_ORIGINS = https://staging.<BASE_DOMAIN>,https://painel.staging.<BASE_DOMAIN>,https://admin.staging.<BASE_DOMAIN>,https://demo.staging.<BASE_DOMAIN>
+APP_BASE_DOMAIN = staging.<BASE_DOMAIN>
 ```
 
-Sem curinga. `Access-Control-Allow-Origin: *` é **incompatível** com
-`credentials: include` — o navegador recusa —, e a API autentica por cookie.
+Remover qualquer URL temporária de `*.vercel.app` que não precise continuar
+autorizada. Sem curinga: `*` é incompatível com `credentials: include`.
 
-Redeploy da API.
+**Same-site não é same-origin.** Os quatro hosts compartilham o domínio
+registrável, mas cada um é uma origem distinta — CORS continua obrigatório em
+toda chamada.
 
-### Cookies entre sites, e por que `SameSite=None`
+### Cookies
 
-Vercel e Render são **sites diferentes**. Com `SameSite=Lax` o navegador não
-envia o cookie em `fetch` cross-site: o login responderia 200, o `Set-Cookie`
-chegaria, e toda requisição seguinte voltaria 401 — um sistema que parece
-funcionar e não autentica.
+```text
+SESSION_COOKIE_SECURE   = true
+SESSION_COOKIE_SAMESITE = lax
+```
 
-`SESSION_COOKIE_SAMESITE=none` + `SESSION_COOKIE_SECURE=true` descreve
-honestamente essa topologia. O que substitui a proteção que `Lax` dava é o
-`originGuard`: ele recusa com 403, **antes do handler**, qualquer requisição com
-`Origin` fora da allowlist — e `Origin` é posto pelo navegador e não pode ser
-forjado por página. A defesa não sumiu; mudou de mecanismo.
+`api.staging.<BASE_DOMAIN>` e `painel.staging.<BASE_DOMAIN>` têm o mesmo
+domínio registrável, logo são **same-site** — e um cookie `Lax` **é** enviado
+no `fetch` entre eles. `None` só seria necessário com domínios registráveis
+diferentes (`*.vercel.app` × `*.onrender.com`, porque `vercel.app` está na
+Public Suffix List). Com domínio próprio, `Lax` mantém a proteção contra POST
+vindo de um site externo, e não há motivo para abrir mão dela.
 
-A configuração **recusa** `none` sem `Secure`: o navegador descartaria esse
-cookie de qualquer forma.
+O cookie é **host-only**: nenhum atributo `Domain` é definido, então ele
+pertence exclusivamente a `api.staging.<BASE_DOMAIN>`. Um
+`Domain=.staging.<BASE_DOMAIN>` o entregaria a todo subdomínio, inclusive a um
+que venha a ser comprometido — alcance maior sem nenhuma necessidade. Os
+frontends não leem o cookie: ele é `HttpOnly`.
+
+### Resolução de comunidade — limitação conhecida
+
+Quando `demo.staging.<BASE_DOMAIN>` chama `api.staging.<BASE_DOMAIN>`, a API
+recebe a requisição no **próprio** hostname. Usar subdomínios **não** faz o
+`Host` carregar a comunidade.
+
+```text
+STAGING    cabeçalho x-tenant-slug permitido, para comunidades descartáveis
+PRODUÇÃO   arquitetura de resolução por domínio ainda precisa ser fechada
+           antes do lançamento
+```
+
+O cabeçalho escolhe **qual** comunidade; nunca concede privilégio. Toda rota
+autenticada continua conferindo o vínculo no PostgreSQL. A configuração
+**recusa** este valor em produção.
 
 ---
 

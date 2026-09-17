@@ -9,6 +9,11 @@
 # NAO HA PRODUCAO AQUI. Este arquivo descreve apenas staging.
 #
 # -----------------------------------------------------------------------------
+# PRE-REQUISITO: o Render constroi a partir do REPOSITORIO REMOTO. A branch
+# referenciada abaixo precisa existir no GitHub — um commit apenas local nao e
+# visivel para o provedor, e o servico falha no clone.
+#
+# -----------------------------------------------------------------------------
 # TRES PAPEIS DE BANCO, TRES USOS DISTINTOS
 #
 #   DATABASE_ADMIN_URL   dono do schema. Roda bootstrap, migrations e
@@ -64,27 +69,60 @@ services:
       - key: MFA_ENCRYPTION_KEY
         sync: false
 
-      # Preencher com as tres URLs do Vercel apos o primeiro deploy dos
-      # frontends. Sem allowlist a API recusa subir em staging.
+      # Os quatro hosts de staging, separados por virgula, SEM curinga:
+      #   https://staging.<BASE_DOMAIN>
+      #   https://painel.staging.<BASE_DOMAIN>
+      #   https://admin.staging.<BASE_DOMAIN>
+      #   https://demo.staging.<BASE_DOMAIN>
+      #
+      # `*` e incompativel com `credentials: include` — o navegador recusa — e
+      # esta API autentica por cookie. Allowlist vazia DERRUBA a API em staging,
+      # de proposito: falhar na subida e melhor do que descobrir pelo navegador.
+      #
+      # SAME-SITE NAO E SAME-ORIGIN. Os quatro hosts compartilham o dominio
+      # registravel, mas cada um e uma ORIGEM diferente — CORS continua sendo
+      # exigido em todas as chamadas.
       - key: CORS_ORIGINS
         sync: false
 
+      # Sufixo dos subdominios de comunidade. Com `staging.<BASE_DOMAIN>` aqui,
+      # o `originGuard` aceita automaticamente a origem de qualquer comunidade
+      # EXISTENTE em `{slug}.staging.<BASE_DOMAIN>` — o mesmo criterio
+      # white-label de producao, sem precisar listar cada tenant no CORS.
       - key: APP_BASE_DOMAIN
-        value: plataforma.local
+        sync: false
 
-      # Frontends e API ficam em SITES diferentes (vercel.app x onrender.com).
-      # `SameSite=None` e o unico valor em que o navegador envia o cookie nessa
-      # topologia; `Secure` e obrigatorio junto, e a configuracao recusa subir
-      # sem ele. Quem barra escrita de origem desconhecida e o originGuard.
+      # TOPOLOGIA SAME-SITE, decidida para staging com dominio proprio.
+      #
+      # `api.staging.<BASE_DOMAIN>` e `painel.staging.<BASE_DOMAIN>` tem o MESMO
+      # dominio registravel, entao sao same-site (embora origens distintas) — e
+      # um cookie `SameSite=Lax` E enviado em `fetch` entre eles. `None` seria
+      # necessario apenas se os hosts ficassem em dominios registraveis
+      # diferentes, como `*.vercel.app` x `*.onrender.com`, porque `vercel.app`
+      # esta na Public Suffix List. Com dominio proprio, `Lax` e o valor certo:
+      # mantem a protecao contra POST vindo de um site externo.
+      #
+      # O cookie e HOST-ONLY: nenhum atributo `Domain` e definido, entao ele
+      # pertence exclusivamente ao host da API. Um `Domain=.staging.<...>` o
+      # entregaria a todo subdominio, inclusive a um que venha a ser
+      # comprometido — alcance maior sem nenhuma necessidade.
       - key: SESSION_COOKIE_SECURE
         value: 'true'
       - key: SESSION_COOKIE_SAMESITE
-        value: none
+        value: lax
 
-      # Em staging a API nunca ve o hostname da vitrine no `Host` — os sites
-      # sao diferentes —, entao a resolucao por dominio nao tem o que ler. O
-      # cabecalho e a unica forma de escolher a comunidade nesta topologia.
-      # A configuracao RECUSA este valor em producao.
+      # RESOLUCAO DE COMUNIDADE EM STAGING — limitacao conhecida, nao resolvida.
+      #
+      # Quando `demo.staging.<BASE_DOMAIN>` chama `api.staging.<BASE_DOMAIN>`, a
+      # API recebe a requisicao no PROPRIO hostname. Usar subdominios NAO faz o
+      # `Host` carregar a comunidade: a resolucao por dominio nao tem o que ler.
+      #
+      # Em staging o cabecalho `x-tenant-slug` supre isso, para comunidades
+      # descartaveis. Ele escolhe QUAL comunidade, nunca concede privilegio:
+      # toda rota autenticada continua conferindo o vinculo no PostgreSQL.
+      #
+      # A configuracao RECUSA este valor em producao. A arquitetura white-label
+      # de producao precisa ser fechada antes do lancamento.
       - key: TENANT_HEADER_ENABLED
         value: 'true'
 
