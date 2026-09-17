@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { createPool, type DbPool } from '../../src/pool.js';
+import { pgConnectionConfig } from '../../src/ssl.js';
 import { migrate } from '../../src/migrator.js';
 
 const { Client } = pg;
@@ -64,7 +65,7 @@ export function workerPool(): DbPool {
  * pelos proprios identificadores em vez de supor tabela vazia.
  */
 export async function resetFoundationTables(): Promise<void> {
-  const client = new Client({ connectionString: TEST_OWNER_URL });
+  const client = new Client(pgConnectionConfig(TEST_OWNER_URL));
   await client.connect();
   try {
     // A ordem respeita as chaves estrangeiras. `tenants` cascateia para

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { loadMigrations, migrate } from '../src/migrator.js';
+import { pgConnectionConfig } from '../src/ssl.js';
 import {
   TEST_OWNER_URL,
   describeSkipReason,
@@ -34,7 +35,7 @@ describe.skipIf(!hasTestDatabase)(`migrations em banco vazio ${
 
   beforeAll(async () => {
     tempUrl = databaseUrlWith(TEST_OWNER_URL, tempDatabase);
-    const admin = new Client({ connectionString: TEST_OWNER_URL });
+    const admin = new Client(pgConnectionConfig(TEST_OWNER_URL));
     await admin.connect();
     try {
       await admin.query(`CREATE DATABASE "${tempDatabase}"`);
@@ -46,7 +47,7 @@ describe.skipIf(!hasTestDatabase)(`migrations em banco vazio ${
 
   afterAll(async () => {
     if (!created) return;
-    const admin = new Client({ connectionString: TEST_OWNER_URL });
+    const admin = new Client(pgConnectionConfig(TEST_OWNER_URL));
     await admin.connect();
     try {
       await admin.query(
@@ -75,7 +76,7 @@ describe.skipIf(!hasTestDatabase)(`migrations em banco vazio ${
   });
 
   it('cria todas as tabelas exigidas pela fundacao', async () => {
-    const client = new Client({ connectionString: tempUrl });
+    const client = new Client(pgConnectionConfig(tempUrl));
     await client.connect();
     try {
       const { rows } = await client.query<{ tablename: string }>(
@@ -112,7 +113,7 @@ describe.skipIf(!hasTestDatabase)(`migrations em banco vazio ${
   });
 
   it('toda tabela de negocio por comunidade tem tenant_id e RLS ativa', async () => {
-    const client = new Client({ connectionString: tempUrl });
+    const client = new Client(pgConnectionConfig(tempUrl));
     await client.connect();
     try {
       // A raiz da arvore. `tenants.id` E o tenant_id: exigir uma coluna
@@ -166,7 +167,7 @@ describe.skipIf(!hasTestDatabase)(`migrations em banco vazio ${
   });
 
   it('a raiz `tenants` e identificada pela propria PK, e tem RLS', async () => {
-    const client = new Client({ connectionString: tempUrl });
+    const client = new Client(pgConnectionConfig(tempUrl));
     await client.connect();
     try {
       const { rows } = await client.query<{ column_name: string; data_type: string }>(
@@ -187,7 +188,7 @@ describe.skipIf(!hasTestDatabase)(`migrations em banco vazio ${
   });
 
   it('editar uma migration ja aplicada e recusado', async () => {
-    const client = new Client({ connectionString: tempUrl });
+    const client = new Client(pgConnectionConfig(tempUrl));
     await client.connect();
     try {
       await client.query("UPDATE schema_migrations SET checksum = 'alterado' WHERE version = '0001'");

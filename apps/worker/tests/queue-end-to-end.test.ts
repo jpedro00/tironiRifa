@@ -41,6 +41,28 @@ const skipReason =
 /** Schema proprio para esta suite, para nao brigar com o do desenvolvimento. */
 const QUEUE_SCHEMA = 'pgboss_test';
 
+/** Papel dono do schema da fila, o mesmo usado pelo instalador. */
+const OWNER_ROLE = 'app_worker';
+
+/**
+ * Descarta o schema da fila assumindo o papel DONO.
+ *
+ * O instalador transfere a posse do schema para `app_worker`, entao quem
+ * limpa precisa ser ele. Num PostgreSQL proprio isso passa despercebido — o
+ * administrador e superusuario e descarta qualquer coisa. Num provedor
+ * gerenciado ele NAO e, e a limpeza falha com `must be owner of schema`.
+ */
+async function dropQueueSchema(owner: DbPool, schema: string): Promise<void> {
+  const client = await owner.connect();
+  try {
+    await client.query(`SET ROLE ${OWNER_ROLE}`).catch(() => undefined);
+    await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+  } finally {
+    await client.query('RESET ROLE').catch(() => undefined);
+    client.release();
+  }
+}
+
 function unique(prefix: string): string {
   return `${prefix}${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
@@ -57,7 +79,7 @@ describe.skipIf(!hasDb)(`RN21 · outbox -> pg-boss -> consumidor ${hasDb ? '' : 
     owner = createPool({ connectionString: OWNER_URL, applicationName: 'test-queue-owner' });
     worker = createPool({ connectionString: WORKER_URL, applicationName: 'test-queue-worker' });
 
-    await owner.query(`DROP SCHEMA IF EXISTS ${QUEUE_SCHEMA} CASCADE`);
+    await dropQueueSchema(owner, QUEUE_SCHEMA);
 
     // ETAPA ADMINISTRATIVA, uma vez — o mesmo caminho de producao
     // (`npm run queue:install`). Cria os objetos e passa a POSSE ao app_worker.
@@ -77,7 +99,7 @@ describe.skipIf(!hasDb)(`RN21 · outbox -> pg-boss -> consumidor ${hasDb ? '' : 
 
   afterAll(async () => {
     await boss?.stop({ graceful: false }).catch(() => undefined);
-    await owner?.query(`DROP SCHEMA IF EXISTS ${QUEUE_SCHEMA} CASCADE`).catch(() => undefined);
+    await dropQueueSchema(owner, QUEUE_SCHEMA).catch(() => undefined);
     await owner?.end();
     await worker?.end();
   });

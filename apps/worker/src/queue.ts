@@ -1,5 +1,6 @@
 import PgBoss from 'pg-boss';
 import pg from 'pg';
+import { pgConnectionConfig } from '@campaigns/db';
 import type { Publisher } from './outbox/relay.js';
 
 const { Client } = pg;
@@ -62,6 +63,36 @@ export interface QueueOptions {
  * tarde — alterar tabela que se possui nao exige privilegio no banco — sem que
  * o worker jamais possa criar um schema novo.
  */
+/**
+ * Garante que o executor pode criar objetos dentro de um schema que pertence a
+ * outro papel, assumindo esse papel apenas para a concessao.
+ *
+ * Silencioso quando nao ha o que fazer: se o schema ainda nao existe (a fila
+ * vai cria-lo) ou se o executor ja e o dono, nao ha negociacao nenhuma.
+ */
+async function concederCreateNoSchema(
+  admin: pg.Client,
+  schema: string,
+  ownerRole: string,
+): Promise<void> {
+  const { rows } = await admin.query<{ dono: string; eu: string }>(
+    `SELECT pg_get_userbyid(nspowner) AS dono, current_user AS eu
+       FROM pg_namespace WHERE nspname = $1`,
+    [schema],
+  );
+  const estado = rows[0];
+  if (!estado || estado.dono === estado.eu) return;
+
+  await admin.query(`SET ROLE ${ownerRole}`);
+  try {
+    await admin.query(`GRANT USAGE, CREATE ON SCHEMA ${schema} TO ${estado.eu}`);
+  } finally {
+    // RESET, e nao `SET ROLE` de volta: devolve exatamente o papel de sessao,
+    // sem depender de o nome capturado estar correto.
+    await admin.query('RESET ROLE');
+  }
+}
+
 export async function installQueue(input: {
   readonly adminConnectionString: string;
   readonly schema: string;
@@ -76,9 +107,8 @@ export async function installQueue(input: {
   }
 
   const admin = new Client({
-    connectionString: input.adminConnectionString,
+    ...pgConnectionConfig(input.adminConnectionString, { ssl: input.ssl ?? false }),
     application_name: 'campaigns-queue-install',
-    ...(input.ssl ? { ssl: { rejectUnauthorized: true } } : {}),
   });
   await admin.connect();
 
@@ -94,6 +124,24 @@ export async function installQueue(input: {
      * a mesma verdade da biblioteca, sem o runtime junto.
      */
     if (!(await queueIsInstalled(admin, input.schema))) {
+      /**
+       * O schema pode JA PERTENCER ao papel do worker — a migration 0008 o cria
+       * assim de proposito. Quando o administrador nao e superusuario (caso de
+       * todo provedor gerenciado), ele nao tem CREATE num schema de outro dono,
+       * e a instalacao morre com `permission denied for schema`.
+       *
+       * A saida nao e transferir a posse para o administrador: isso desfaria
+       * justamente a propriedade que o worker precisa ter. E tambem nao e
+       * rodar tudo como o worker — o plano do pg-boss comeca com
+       * `CREATE SCHEMA IF NOT EXISTS`, que exige CREATE no BANCO mesmo quando o
+       * schema existe, e o worker nao tem nem deve ter esse privilegio.
+       *
+       * O administrador ASSUME o papel dono apenas para conceder a si proprio
+       * o direito de criar ali dentro. Nenhuma posse muda de lugar, e o
+       * privilegio concedido e no schema — nunca no banco.
+       */
+      await concederCreateNoSchema(admin, input.schema, input.ownerRole);
+
       await admin.query(PgBoss.getConstructionPlans(input.schema));
       created = true;
     }
@@ -179,9 +227,8 @@ async function queueIsInstalled(client: pg.Client, schema: string): Promise<bool
  */
 export async function startQueue(config: QueueOptions): Promise<PgBoss> {
   const probe = new Client({
-    connectionString: config.QUEUE_DATABASE_URL,
+    ...pgConnectionConfig(config.QUEUE_DATABASE_URL, { ssl: config.DATABASE_SSL }),
     application_name: 'campaigns-queue-probe',
-    ...(config.DATABASE_SSL ? { ssl: { rejectUnauthorized: true } } : {}),
   });
   await probe.connect();
   try {
@@ -198,9 +245,8 @@ export async function startQueue(config: QueueOptions): Promise<PgBoss> {
   }
 
   const boss = new PgBoss({
-    connectionString: config.QUEUE_DATABASE_URL,
+    ...pgConnectionConfig(config.QUEUE_DATABASE_URL, { ssl: config.DATABASE_SSL }),
     schema: config.QUEUE_SCHEMA,
-    ...(config.DATABASE_SSL ? { ssl: { rejectUnauthorized: true } } : {}),
   });
 
   boss.on('error', (error) => {

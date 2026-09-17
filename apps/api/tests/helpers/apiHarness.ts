@@ -1,7 +1,7 @@
 import type { Express } from 'express';
 import request from 'supertest';
 import pg from 'pg';
-import { createPool, migrate, type DbPool } from '@campaigns/db';
+import { createPool, migrate, pgConnectionConfig, type DbPool } from '@campaigns/db';
 import { createApp } from '../../src/app.js';
 import { loadConfig, type AppConfig } from '../../src/config.js';
 import { LoginThrottle } from '../../src/lib/loginThrottle.js';
@@ -312,7 +312,7 @@ export async function identityAuditActions(owner: DbPool, userId: string): Promi
 
 /** Limpa dados entre suites, respeitando a imutabilidade da trilha (RN11). */
 export async function cleanup(owner: DbPool): Promise<void> {
-  const client = new Client({ connectionString: TEST_OWNER_URL });
+  const client = new Client(pgConnectionConfig(TEST_OWNER_URL));
   await client.connect();
   try {
     await client.query('DELETE FROM event_consumptions');

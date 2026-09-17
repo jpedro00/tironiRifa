@@ -64,6 +64,21 @@ services:
       - key: DATABASE_SSL
         value: 'true'
 
+      # CA raiz do provedor, em PEM. NAO E SEGREDO — e um certificado publico.
+      #
+      # Provedores gerenciados assinam o certificado do banco com uma raiz
+      # propria, que nao vem na lista de CAs publicas do Node (o Supabase usa a
+      # "Supabase Root 2021 CA"). Sem informa-la, a conexao falha com
+      # `SELF_SIGNED_CERT_IN_CHAIN` — e a saida tentadora seria desligar
+      # `rejectUnauthorized`, o que manteria a conexao cifrada e jogaria fora a
+      # unica coisa que prova COM QUEM se esta falando.
+      #
+      # `sync: false` nao e por sigilo: o PEM tem multiplas linhas e precisa ser
+      # colado no painel. O helper aceita `\n` escapado, para paineis que
+      # achatam o valor numa linha so.
+      - key: DATABASE_CA_CERT
+        sync: false
+
       # 32 bytes em base64. Perder esta chave invalida todos os segundos
       # fatores ja cadastrados.
       - key: MFA_ENCRYPTION_KEY
@@ -176,6 +191,9 @@ services:
         value: pgboss
       - key: DATABASE_SSL
         value: 'true'
+      # Mesma CA publica da API. Ver o comentario no servico web acima.
+      - key: DATABASE_CA_CERT
+        sync: false
 
       - key: OUTBOX_POLL_INTERVAL_MS
         value: '2000'

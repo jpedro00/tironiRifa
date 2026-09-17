@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { pgConnectionConfig } from './ssl.js';
 
 const { Pool } = pg;
 
@@ -26,11 +27,12 @@ export interface CreatePoolOptions {
 
 export function createPool(options: CreatePoolOptions): DbPool {
   return new Pool({
-    connectionString: options.connectionString,
+    // A URL vai SEM parametros de TLS e o objeto `ssl` vem junto: se o
+    // `sslmode` ficasse na URL, o `pg` o usaria para sobrescrever o `ssl`
+    // explicito e apagaria a CA. Ver `pgConnectionConfig`.
+    ...pgConnectionConfig(options.connectionString, { ssl: options.ssl ?? false }),
     max: options.max ?? 10,
     application_name: options.applicationName ?? 'campaigns-api',
-    // Neon e provedores gerenciados exigem TLS; Postgres local normalmente nao.
-    ...(options.ssl ? { ssl: { rejectUnauthorized: true } } : {}),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
   });

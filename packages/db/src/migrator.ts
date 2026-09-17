@@ -3,6 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { pgConnectionConfig } from './ssl.js';
 
 const { Client } = pg;
 
@@ -75,7 +76,10 @@ export interface MigrateResult {
  */
 export async function migrate(connectionString: string, dir?: string): Promise<MigrateResult> {
   const migrations = await loadMigrations(dir);
-  const client = new Client({ connectionString, application_name: 'campaigns-migrator' });
+  const client = new Client({
+    ...pgConnectionConfig(connectionString),
+    application_name: 'campaigns-migrator',
+  });
   await client.connect();
 
   const applied: string[] = [];

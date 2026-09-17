@@ -22,7 +22,24 @@ export default defineConfig({
       'apps/api/tests/**/*.test.ts',
       'apps/worker/tests/**/*.test.ts',
     ],
-    testTimeout: 30_000,
-    hookTimeout: 60_000,
+    /**
+     * Tempo limite por teste.
+     *
+     * 30s basta com PostgreSQL local, onde uma ida e volta custa menos de um
+     * milissegundo. Contra um banco GERENCIADO em outra regiao, a mesma suite
+     * paga latencia real: da maquina de quem desenvolve ate `us-west-2` cada
+     * conexao custa segundos, e um teste que faz seis logins — cada um com
+     * `scrypt` e varias consultas — estoura 30s sem que nada esteja errado.
+     *
+     * Aumentar o limite NAO enfraquece assercao nenhuma: o que muda e quanto
+     * tempo se espera pela rede, nao o que se exige do sistema. Por isso e
+     * variavel de ambiente, e nao um numero maior fixo: quem roda local
+     * continua descobrindo lentidao de verdade em 30s.
+     *
+     * Este custo e da BANCADA, nao da aplicacao: em producao a API roda na
+     * mesma regiao do banco, e a ida e volta volta a ser de milissegundos.
+     */
+    testTimeout: Number(process.env['VITEST_TEST_TIMEOUT_MS'] ?? 30_000),
+    hookTimeout: Number(process.env['VITEST_HOOK_TIMEOUT_MS'] ?? 60_000),
   },
 });

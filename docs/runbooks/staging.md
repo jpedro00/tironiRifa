@@ -87,6 +87,36 @@ SELECT nspname, pg_get_userbyid(nspowner) FROM pg_namespace
 -- pgboss precisa pertencer a app_worker
 ```
 
+### A Data API não faz parte desta arquitetura
+
+Provedores que oferecem **Data API** (Supabase REST/GraphQL, PostgREST) criam os
+papéis `anon`, `authenticated` e `service_role` e — por padrão — concedem a eles
+acesso total sobre toda tabela nova do schema `public`. Não é alguém que ligou:
+vem dos *default privileges* do papel que roda as migrations.
+
+O RIFAS **não usa** esse caminho:
+
+```text
+navegador → API RIFAS (app_user) → PostgreSQL
+worker    →           (app_worker) → PostgreSQL
+```
+
+A migration `0009` revoga o acesso desses três papéis e corrige os *default
+privileges*, para que a primeira tabela da Fase 2 não recrie o problema em
+silêncio. Três coisas que a RLS **não** resolveria sozinha e por isso dependem
+do GRANT:
+
+- `schema_migrations` não tem policy — o histórico ficaria legível e gravável;
+- **`TRUNCATE` não passa por RLS**: nenhuma policy impede esvaziar `tenants`;
+- **`service_role` tem `BYPASSRLS`** — para ele, toda a RLS seria decorativa.
+
+A proteção vive no **banco**, não numa configuração de painel que outra pessoa
+pode religar. Desligar a Data API no painel é opcional e não substitui isto.
+
+Se um dia a Data API entrar na arquitetura, o caminho é conceder explicitamente
+o que aquele fluxo precisa — tabela a tabela, com policy própria —, nunca
+restaurar o padrão amplo.
+
 ### Provar a RLS no banco gerenciado
 
 Migration aplicada não é prova de isolamento. Rodar a suíte contra o Neon:
@@ -114,9 +144,25 @@ Variáveis marcadas `sync: false` são pedidas na criação e guardadas cifradas
 
 ```text
 DATABASE_URL           app_user (nunca o dono)
+DATABASE_CA_CERT       CA raiz do provedor, em PEM — PÚBLICA, não é segredo
 MFA_ENCRYPTION_KEY     node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 CORS_ORIGINS           preencher depois do passo 4
+APP_BASE_DOMAIN        staging.<BASE_DOMAIN>
 ```
+
+### Por que a CA precisa ser informada
+
+Provedores gerenciados assinam o certificado do banco com uma raiz **própria**,
+que não está na lista de CAs públicas que o Node confia — o Supabase usa a
+`Supabase Root 2021 CA`. Sem informá-la, toda conexão falha com
+`SELF_SIGNED_CERT_IN_CHAIN`.
+
+A saída tentadora, nesse ponto, é desligar `rejectUnauthorized`. Isso manteria a
+conexão cifrada e jogaria fora a única coisa que prova **com quem** se está
+falando — exatamente o que um intermediário precisa. O certificado é público:
+informá-lo custa uma variável e preserva a garantia.
+
+O mesmo valor vai para a API e para o worker.
 
 `CORS_ORIGINS` só existe depois que o Vercel devolver as URLs. Deixar em branco
 faz a API **recusar subir** em staging, de propósito — uma API sem allowlist
