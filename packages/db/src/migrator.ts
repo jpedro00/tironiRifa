@@ -19,6 +19,27 @@ export interface MigrationFile {
 
 const FILENAME_RE = /^(\d{4})_([a-z0-9_]+)\.sql$/;
 
+/**
+ * Checksum do CONTEUDO da migration, insensivel a fim de linha.
+ *
+ * POR QUE NORMALIZAR ANTES DE HASHEAR. A guarda de checksum existe para pegar
+ * migration EDITADA depois de aplicada (erro E6). Hashear os bytes crus faz ela
+ * disparar tambem quando nada mudou no SQL: basta o Git materializar o arquivo
+ * com CRLF em vez de LF, o que ele faz por padrao no Windows (`core.autocrlf`).
+ *
+ * O sintoma e desconcertante e caro: o CI em Linux aplica as migrations, um
+ * desenvolvedor em Windows clona o mesmo commit e o migrador recusa rodar
+ * dizendo que `0001` "mudou depois de aplicada" — apontando para um arquivo que
+ * ninguem tocou. Pior: a suspeita natural e de que o banco foi adulterado.
+ *
+ * `\r\n` -> `\n` faz o checksum descrever o SQL, nao a plataforma que o
+ * escreveu. Bancos ja migrados continuam validos: arquivos gravados com LF
+ * produzem exatamente o mesmo hash de antes.
+ */
+function checksumOf(sql: string): string {
+  return createHash('sha256').update(sql.replace(/\r\n/g, '\n'), 'utf8').digest('hex');
+}
+
 export async function loadMigrations(dir: string = MIGRATIONS_DIR): Promise<MigrationFile[]> {
   const entries = await readdir(dir);
   const files = entries.filter((entry) => entry.endsWith('.sql')).sort();
@@ -37,7 +58,7 @@ export async function loadMigrations(dir: string = MIGRATIONS_DIR): Promise<Migr
       name: match[2]!,
       filename,
       sql,
-      checksum: createHash('sha256').update(sql, 'utf8').digest('hex'),
+      checksum: checksumOf(sql),
     });
   }
 
